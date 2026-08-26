@@ -1,0 +1,54 @@
+# Vibe Coding
+.omc/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+
+# Environment
+.env
+
+# IDE
+.idea/
+
+# Model files (large)
+model/
+
+# Database
+data/
+*.db
+*.sqlite
+*.sqlite3
+
+# Claude Code
+.claude/
+
+# Plans (generated during development)
+docs/
+
+# Temp files
+*.har
+*.log
+*.tmp
+
+# Build
+dist/
+build/
+
+# Node.js (VitePress docs)
+node_modules/
+!Documents/docs
+
+# Debug scratch & run artifacts (keep local, never commit)
+# inspect_imgs.py 含硬编码 access token; crack_*.py 含无法区分的 32-hex 串
+debug_captcha/inspect_imgs.py
+debug_captcha/crack_by_literals.py
+debug_captcha/crack_encryption.py
+debug_captcha/book_probe_result.json
+debug_captcha/captcha_expiry_result.json
+debug_captcha/*.png
+debug_captcha/*.log

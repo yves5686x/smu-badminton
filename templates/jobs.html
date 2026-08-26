@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SMU 羽毛球 - 任务中心</title>
+    <link rel="stylesheet" href="/static/css/main.css">
+    <link rel="stylesheet" href="/static/css/jobs.css">
+</head>
+<body>
+    <!-- Toast 容器 -->
+    <div class="toast-container" id="toast-container"></div>
+
+    <div class="container">
+        <!-- 头部 -->
+        <header class="header">
+            <div class="header-left">
+                <span class="logo">SMU 羽毛球任务</span>
+                <a href="/" class="back-link">← 返回预约页面</a>
+            </div>
+            <div class="header-right">
+                <button class="btn btn-outline" id="configBtn">⚙️ 配置</button>
+                <button class="btn btn-outline" id="refreshBtn">🔄 刷新</button>
+                <button class="btn btn-icon btn-outline" id="themeBtn" title="切换主题">🌙</button>
+            </div>
+        </header>
+
+        <!-- 统计卡片 -->
+        <div class="stats">
+            <div class="stat-card">
+                <div class="stat-value" id="stat-total">0</div>
+                <div class="stat-label">总任务数</div>
+            </div>
+            <div class="stat-card warning">
+                <div class="stat-value" id="stat-running">0</div>
+                <div class="stat-label">运行中</div>
+            </div>
+            <div class="stat-card success">
+                <div class="stat-value" id="stat-done">0</div>
+                <div class="stat-label">已完成</div>
+            </div>
+            <div class="stat-card danger">
+                <div class="stat-value" id="stat-failed">0</div>
+                <div class="stat-label">已失败</div>
+            </div>
+        </div>
+
+        <!-- 任务列表 -->
+        <main class="main-content">
+            <div class="content-header">
+                <h2 class="content-title">任务列表</h2>
+                <span id="last-update" style="font-size: 13px; color: var(--text-secondary);">--</span>
+            </div>
+            <div class="table-container">
+                <table class="jobs-table" id="jobs-table">
+                    <thead>
+                        <tr>
+                            <th>任务ID</th>
+                            <th>类型</th>
+                            <th>创建时间</th>
+                            <th>状态</th>
+                            <th>参数</th>
+                            <th>操作</th>
+                        </tr>
+                    </thead>
+                    <tbody id="jobs-tbody">
+                        <tr>
+                            <td colspan="6">
+                                <div class="loading">
+                                    <div class="spinner"></div>
+                                </div>
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </main>
+    </div>
+
+    <!-- 参数详情弹窗 -->
+    <dialog id="params-dialog">
+        <div class="dialog-header">
+            <h3 class="dialog-title">📄 任务参数</h3>
+        </div>
+        <div class="dialog-body">
+            <div class="params-panel">
+                <div class="params-summary" id="params-summary"></div>
+            </div>
+        </div>
+        <div class="dialog-footer">
+            <button class="btn btn-primary" id="params-close">关闭</button>
+        </div>
+    </dialog>
+
+    <!-- 配置弹窗 -->
+    <dialog id="config-dialog">
+        <div class="dialog-header">
+            <h3 class="dialog-title">⚙️ 系统配置</h3>
+        </div>
+        <div class="dialog-body">
+            <div style="display: flex; flex-direction: column; gap: 20px;">
+                <div>
+                    <label style="display: block; font-weight: 600; margin-bottom: 8px; font-size: 14px;">当前登录地址</label>
+                    <div id="current-login-url">加载中...</div>
+                </div>
+                <div>
+                    <label for="new-login-url" style="display: block; font-weight: 600; margin-bottom: 8px; font-size: 14px;">新的登录地址</label>
+                    <textarea
+                        id="new-login-url"
+                        class="dialog-textarea"
+                        placeholder="输入新的登录地址"
+                    ></textarea>
+                    <div class="dialog-note">
+                        ✅ 配置修改后会自动重载，立即生效（无需重启）
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="dialog-footer">
+            <button class="btn btn-outline" id="config-cancel">取消</button>
+            <button class="btn btn-primary" id="config-save">保存</button>
+        </div>
+    </dialog>
+
+    <!-- 登录弹窗 -->
+    <dialog id="login-dialog">
+        <div class="dialog-header">
+            <h3 class="dialog-title">🔐 登录验证</h3>
+        </div>
+        <form id="login-form">
+            <div class="dialog-body">
+                <div class="login-form">
+                    <div class="login-field">
+                        <label for="login-username">学号</label>
+                        <input type="text" id="login-username" class="login-input" autocomplete="username" placeholder="请输入学号">
+                    </div>
+                    <div class="login-field">
+                        <label for="login-password">密码</label>
+                        <div class="login-input-wrapper">
+                            <input type="password" id="login-password" class="login-input" autocomplete="current-password" placeholder="请输入密码">
+                            <button type="button" class="toggle-password" id="togglePwd">显示</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="dialog-footer">
+                <button type="button" class="btn btn-outline" id="login-cancel">取消</button>
+                <button type="submit" class="btn btn-primary">登录</button>
+            </div>
+        </form>
+    </dialog>
+
+    <script src="/static/js/jobs.js"></script>
+</body>
+</html>

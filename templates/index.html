@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SMU Badminton - Booking</title>
+    <link rel="stylesheet" href="/static/css/main.css">
+</head>
+<body>
+    <!-- Toast 容器 -->
+    <div class="toast-container" id="toast-container"></div>
+
+    <div class="container">
+        <!-- 头部 -->
+        <header class="header">
+            <!-- 标题行 -->
+            <div class="header-row header-title-row">
+                <span class="logo">SMU 羽毛球预约</span>
+                <div class="header-right">
+                    <div class="header-actions">
+                        <div class="form-group" style="margin: 0; background: transparent; border: none; padding: 0;">
+                            <span id="current-username" class="user-badge">Not logged in</span>
+                        </div>
+                        <button class="btn btn-outline" id="logoutBtn" style="height: 38px;">
+                            退出登录
+                        </button>
+                        <button class="btn btn-icon btn-outline" id="themeBtn" title="切换主题">
+                            🌙
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 工具行 -->
+            <div class="header-row header-tools-row">
+                <div class="header-left">
+                    <div class="form-group">
+                        <label class="form-label" for="date">选择日期</label>
+                        <input type="date" id="date" class="form-input">
+                    </div>
+
+                    <div class="switch-wrapper">
+                        <span class="form-label">21:00 抢票模式</span>
+                        <div class="switch active" id="modeSwitch" title="点击切换模式"></div>
+                    </div>
+
+                    <button class="btn btn-outline" id="refreshBtn" title="刷新数据" style="border-color: var(--primary); color: var(--primary);">
+                        🔄 刷新
+                    </button>
+                </div>
+
+                <!-- 场地地图 (改为悬浮气泡) -->
+                <div class="court-map-wrapper">
+                    <div class="court-map-toggle">
+                        <span>🗺️</span> 场地分布图
+                    </div>
+                    <div class="court-map">
+                        <div class="court-map-title">场地分布平面图</div>
+                        <div class="court-row"><span class="court-cell">15</span></div>
+                        <div class="court-row">
+                            <span class="court-cell">14</span>
+                            <span class="court-cell">13</span>
+                            <span class="court-cell">12</span>
+                            <span class="court-cell">11</span>
+                        </div>
+                        <div class="court-row">
+                            <span class="court-cell">10</span>
+                            <span class="court-cell">9</span>
+                            <span class="court-cell">8</span>
+                            <span class="court-cell">7</span>
+                            <span class="court-cell">6</span>
+                            <span class="court-cell">5</span>
+                        </div>
+                        <div class="court-row">
+                            <span class="court-cell">4</span>
+                            <span class="court-cell">3</span>
+                            <span class="court-cell">2</span>
+                            <span class="court-cell">1</span>
+                        </div>
+                        <div class="court-entrance">↓ 入口</div>
+                    </div>
+                </div>
+            </div>
+        </header>
+
+        <!-- 主内容 -->
+        <main class="main-content">
+            <!-- 图例 -->
+            <div class="legend">
+                <div class="legend-item">
+                    <span class="legend-dot available"></span>
+                    <span>可预约</span>
+                </div>
+                <div class="legend-item">
+                    <span class="legend-dot selected"></span>
+                    <span>我的预约</span>
+                </div>
+                <div class="legend-item">
+                    <span class="legend-dot reserved"></span>
+                    <span>已被预约</span>
+                </div>
+                <div class="legend-item">
+                    <span class="legend-dot others"></span>
+                    <span>他人排队中</span>
+                </div>
+                <div class="legend-status">
+                    <div class="status-item">
+                        <span class="status-dot"></span>
+                        <span id="status-text">已连接</span>
+                    </div>
+                    <div class="status-item">
+                        <span id="last-update">上次更新: --</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 表格容器 -->
+            <div class="table-container" id="table-container">
+                <!-- 加载覆盖层 -->
+                <div class="loading-overlay" style="display: none;">
+                    <div class="loading-spinner"></div>
+                    <div class="loading-text">加载中...</div>
+                </div>
+                <table class="schedule-table" id="schedule-table">
+                    <thead>
+                        <tr>
+                            <th>场地</th>
+                            <th>09-10</th>
+                            <th>10-11</th>
+                            <th>11-12</th>
+                            <th>12-13</th>
+                            <th>13-14</th>
+                            <th>14-15</th>
+                            <th>15-16</th>
+                            <th>16-17</th>
+                            <th>17-18</th>
+                            <th>18-19</th>
+                            <th>19-20</th>
+                            <th>20-21</th>
+                        </tr>
+                    </thead>
+                    <tbody id="schedule-tbody"></tbody>
+                </table>
+            </div>
+
+        </main>
+    </div>
+
+    <!-- 确认弹窗 -->
+    <dialog id="confirm-dialog">
+        <div class="dialog-header">
+            <h3 class="dialog-title" id="dialog-title">确认预约</h3>
+        </div>
+        <div class="dialog-body">
+            <div class="dialog-info" id="dialog-info"></div>
+        </div>
+        <div class="dialog-footer">
+            <button class="btn btn-outline" id="dialog-cancel">取消</button>
+            <button class="btn btn-primary" id="dialog-ok">确定</button>
+        </div>
+    </dialog>
+
+    <!-- 登录弹窗 -->
+    <dialog id="login-dialog">
+        <div class="dialog-header">
+            <h3 class="dialog-title" id="login-dialog-title">🔐 登录</h3>
+        </div>
+        <form id="login-form">
+            <div class="dialog-body">
+                <div class="login-form">
+                    <div class="login-field">
+                        <label for="login-username">学号</label>
+                        <input type="text" id="login-username" class="login-input" autocomplete="username" placeholder="请输入学号">
+                    </div>
+                    <div class="login-field">
+                        <label for="login-password">密码</label>
+                        <div class="login-input-wrapper">
+                            <input type="password" id="login-password" class="login-input" autocomplete="current-password" placeholder="请输入密码">
+                            <button type="button" class="toggle-password" id="togglePwd">显示</button>
+                        </div>
+                    </div>
+                    <!-- 验证码区域（默认隐藏） -->
+                    <div class="login-field" id="captcha-field" style="display: none;">
+                        <label for="login-captcha">验证码</label>
+                        <div class="captcha-container">
+                            <input type="text" id="login-captcha" class="login-input captcha-input" placeholder="请输入验证码" maxlength="4">
+                            <img id="captcha-image" class="captcha-image" src="" alt="验证码" title="点击刷新">
+                        </div>
+                        <div class="captcha-hint">验证码错误，请手动输入</div>
+                    </div>
+                    <!-- 错误提示区域 -->
+                    <div class="login-error" id="login-error" style="display: none;"></div>
+                </div>
+            </div>
+            <div class="dialog-footer">
+                <button type="button" class="btn btn-outline" id="login-cancel">取消</button>
+                <button type="submit" class="btn btn-primary" id="login-submit">登录</button>
+            </div>
+        </form>
+    </dialog>
+
+    <script src="/static/js/main.js?v=20260827"></script>
+</body>
+</html>

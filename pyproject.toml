@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "smu-badminton"
+version = "1.0.0"
+description = "SMU Badminton Court Booking System"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+
+dependencies = [
+    "fastapi==0.116.1",
+    "uvicorn==0.35.0",
+    "starlette==0.47.3",
+    "pydantic==2.11.9",
+    "python-dotenv==1.1.1",
+    "orjson==3.11.9",
+    "requests==2.32.4",
+    "beautifulsoup4==4.13.4",
+    "lxml==6.0.0",
+    "pillow==11.3.0",
+    "opencv-python==4.12.0.88",
+    "numpy==2.2.6",
+    "ddddocr>=1.4.7",  # 算式验证码整图识别(数字/运算符)。自训 NCNN ResNet 换字体后失效且无法重训，已弃用
+    "pycryptodome>=3.20.0",  # captchaCode AES-128-CBC 加密(复现 SPA w()), 也兼容 cryptography 作回退
+    "tqdm==4.67.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+    "pytest-cov>=4.0",
+    "httpx>=0.24",
+]
+
+[project.scripts]
+smu-badminton = "smu_badminton.server_fastapi:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+asyncio_mode = "auto"

@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Git
+.git/
+.gitignore
+
+# Docker
+Dockerfile
+docker-compose.yml
+
+# 测试和文档
+tests/
+docs/
+.claude/
+scripts/
+*.md
+
+# 调试和临时文件
+*.log
+*.tmp
+*.har
+captcha.png
+
+# Windows / macOS
+Thumbs.db
+Desktop.ini
+.DS_Store
