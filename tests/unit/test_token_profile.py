@@ -1,5 +1,4 @@
 """Token 缓存和刷新单元测试。"""
-import pytest
 from smu_badminton.token_profile import (
     cache_token_for_user,
     get_cached_token,

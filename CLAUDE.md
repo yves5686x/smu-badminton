@@ -50,24 +50,30 @@ Copy `.env.example` to `.env` and configure:
 
 | Module | Purpose |
 |--------|---------|
-| `server_fastapi.py` | FastAPI app, all REST endpoints, lifespan, static files |
-| `server_models.py` | Pydantic request/response models, MetricsMiddleware, RateLimitMiddleware, resource locks, job state, public availability cache |
+| `server_fastapi.py` | FastAPI app, lifespan, middleware wiring, static files |
+| `server_models.py` | Pydantic request/response models, pure-ASGI Metrics/RateLimit middlewares, resource locks, public availability cache |
+| `routes_auth.py` | 认证路由：验证码 / 登录 / 登出 / 静默续期 |
+| `routes_booking.py` | 预约路由：即时 / 定时 / 可用性查询 / 本地记录 |
+| `routes_jobs.py` | 任务路由：任务列表 / 停止 / 单任务状态 / metrics |
+| `routes_config.py` | 配置路由：读取 / 热更新 |
 | `cas_login.py` | CAS auth flow: URL resolution, captcha prep, login with auto/manual captcha, error detection |
-| `cas_login_requests.py` | Compat layer: HTTP retry logic, token cache, network time sync, re-exports from `cas_login` and `booking_api` |
-| `booking_api.py` | Resource queries, time slot queries, appointment creation, availability computation (parallel via ThreadPoolExecutor + shared Session) |
+| `http_utils.py` | HTTP retry helpers, network time sync, `ClockSync` offset calibration |
+| `booking_api.py` | Resource queries, time slot queries, appointment creation/cancellation, availability computation (parallel via ThreadPoolExecutor + shared Session), thread-local session reuse (`get_thread_session`) |
 | `cas_manager.py` | `BookingManager` singleton: job create/track/stop, DB persistence, scheduled/immediate booking orchestration |
 | `cas_ocr.py` | Arithmetic captcha OCR via ddddocr whole-image recognition (replaced deprecated NCNN ResNet pipeline after site font change) |
+| `slide_captcha.py` | 滑块验证码缺口识别（alpha 边缘模板匹配 + 多方法兜底投票） |
+| `token_profile.py` | Token/profile caches (JWT claim parsing), saved user accounts, silent re-login |
 | `core_utils.py` | Thread-safe SQLite `DatabasePool`, custom exceptions (`BookingError`, `DatabaseError`, `LoginError`, `ResourceLockedError`), error handling decorators (`handle_errors`, `db_operation`), password obfuscation |
 | `config.py` | Environment configuration from `.env` |
 
 ### Module Dependencies
 
 ```
-server_fastapi → server_models, cas_manager, cas_login, cas_login_requests, booking_api, config, core_utils
-cas_manager → cas_login_requests, core_utils
-cas_login_requests → cas_login, booking_api  (compat/bridge layer)
-booking_api → cas_login_requests  (for HTTP retry helpers)
-cas_login → cas_ocr, config
+server_fastapi → routes_{auth,booking,jobs,config}, server_models, cas_manager, core_utils, config
+routes_*       → server_models, cas_manager, booking_api, token_profile, core_utils
+cas_manager    → cas_login, booking_api, http_utils, token_profile, core_utils
+booking_api    → http_utils (retry helpers), token_profile, slide_captcha, config
+cas_login      → cas_ocr, http_utils(间接), config
 ```
 
 ### Data Flow
@@ -101,6 +107,20 @@ Two SQLite tables via `core_utils.DatabasePool`:
 
 Target time = `bookdate - 7 days + target_time_str`. E.g., booking for 2025-12-18 with target 21:00:00 means attempt at 2025-12-11 21:00:00.
 
+### Upstream Constraints (measured 2026-08-27 via scripts/test_captcha_reuse.py)
+
+| Constraint | Measured behavior | Design consequence |
+|---|---|---|
+| Slide captcha lifetime | Single-use: second save with same credentials returns 「验证码不能重复使用」; server still recognizes it ≥3 min later | Every shot needs its own captcha; solve pool during prefetch window |
+| Captcha validation order | Server validates captcha BEFORE business rules; unverified captcha → 「系统异常」, valid captcha → business errors | Calibrated negative control possible; classifier keywords stable |
+| Solver reliability | ~70% per attempt (fails with checkCaptcha 4001), retry succeeds | Retry redundancy belongs in prefetch window (cheap time), not at T-0 |
+| Save rate limit | Per-account: ~2 rapid saves OK, 3rd immediately banned for exactly 3 minutes | `MAX_UPSTREAM_BURST = 2` hard cap on concurrent shots |
+| Official cancel API | `checkAppointmentCancelTime(id)` + `updateAppointmentInformationState(id, state="1")` works | Available for implementing real cancellation later |
+
+### Rush Scheduling Pipeline (start_scheduled_booking)
+
+T-75s wake → `ClockSync.sync()` measures network-vs-local offset → login (JWT exp pre-checked against target time, refreshed early if needed) → dedupe check + resource/time prefetch + user_info resolution all through one warmed `_shared_session()` → build captcha pool (`min(num_threads, 2)` credentials, retry until T-35s) → workers wait via local clock + offset (zero HTTP near T-0) → barrier → each shot fires single-shot (`allow_retry=False`, 4s timeout) with its own credential → first success stops the rest. Ban responses are detected and logged with the 3-minute unban implication.
+
 ### OCR Models (deprecated)
 
 `model/` directory (gitignored) previously held the NCNN ResNet triplet used by the old captcha
@@ -117,13 +137,14 @@ The `model/` files may still exist on disk but are no longer loaded.
 | `/api/availability` | POST | Check court availability (token + bookdate) |
 | `/api/book` | POST | Immediate booking attempt |
 | `/api/book/schedule` | POST | Schedule booking for specific time |
-| `/api/jobs` | GET | List all booking jobs |
+| `/api/jobs` | GET | List all booking jobs（支持 `?username=` 过滤，前端轮询用） |
 | `/api/jobs/{job_id}/stop` | POST | Cancel a scheduled job |
-| `/api/jobs/stop_by_params` | POST | Cancel job by booking params |
+| `/api/jobs/stop_by_params` | POST | Cancel job by booking params（同时尽力撤销学校侧预约：调用方传 `access_token` 或凭服务端保存账号静默重登） |
 | `/api/local_bookings` | GET | List local booking records |
 | `/api/login` | POST | CAS login with captcha |
 | `/api/captcha` | POST | Get captcha image |
 | `/api/logout` | POST | Clear token cache |
+| `/api/auth/refresh` | POST | Silent re-login with saved account, returns fresh access_token |
 | `/api/auth/check` | GET | Check auth status |
 | `/api/config` | GET | Frontend configuration |
 | `/api/metrics` | GET | Request metrics |

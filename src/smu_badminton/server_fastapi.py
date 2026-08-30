@@ -45,13 +45,45 @@ async def lifespan(app: FastAPI):
 
     _lock_cleanup_task = asyncio.create_task(_locks_cleanup())
     _jobs_cleanup_task = asyncio.create_task(_jobs_cleanup())
+    _lbookings_cleanup_task = asyncio.create_task(_stale_local_bookings_cleanup())
     try:
         yield
     finally:
         _lock_cleanup_task.cancel()
         _jobs_cleanup_task.cancel()
+        _lbookings_cleanup_task.cancel()
         # 关闭数据库连接池
         close_db_pool()
+
+
+async def _stale_local_bookings_cleanup():
+    """周期清理已过场的本地预约记录（原 GET /local_bookings 内联逻辑，移到后台）。"""
+    from datetime import datetime, timezone, timedelta
+
+    from .core_utils import get_db_pool
+
+    beijing_tz = timezone(timedelta(hours=8))
+    while True:
+        try:
+            await asyncio.sleep(600)  # 每10分钟清理一次
+            now_dt = datetime.now(beijing_tz)
+            with get_db_pool().get_connection() as conn:
+                cur = conn.execute("SELECT id, bookdate, jssj FROM local_bookings")
+                to_delete = []
+                for row_id, bookdate, jssj in cur.fetchall():
+                    try:
+                        end_dt = datetime.strptime(f"{bookdate} {jssj}", "%Y-%m-%d %H:%M").replace(tzinfo=beijing_tz)
+                        if end_dt < now_dt:
+                            to_delete.append((row_id,))
+                    except ValueError:
+                        continue
+                if to_delete:
+                    conn.executemany("DELETE FROM local_bookings WHERE id = ?", to_delete)
+                    logger.info(f"清理了 {len(to_delete)} 条过期预约记录")
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.warning(f"过期预约记录清理失败: {e}")
 
 
 async def _jobs_cleanup():
@@ -83,17 +115,17 @@ async def _jobs_cleanup():
 app = FastAPI(title="羽毛球预约接口", version="1.0.0", lifespan=lifespan, default_response_class=ORJSONResponse)
 
 # CORS 配置
+# 前端与本服务同源部署，正常使用不需要跨域；这里保留宽松的读取放行，
+# 但不开 allow_credentials——那会把 Origin 反射回去，等于对任意站点开放凭据请求。
+# API 认证走请求体里的 Bearer token，与 cookie 无关。
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-try:
-    app.add_middleware(GZipMiddleware, minimum_size=500)
-except Exception:
-    pass
+app.add_middleware(GZipMiddleware, minimum_size=500)
 
 app.add_middleware(MetricsMiddleware)
 app.add_middleware(RateLimitMiddleware)

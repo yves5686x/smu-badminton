@@ -1,7 +1,5 @@
 """滑块验证码缺口识别单元测试。"""
-import pytest
 import numpy as np
-from unittest.mock import patch
 
 
 def test_decode_base64_image_valid():
@@ -59,7 +57,7 @@ def test_solve_slide_captcha_invalid_input():
 
 def test_solve_slide_captcha_with_mock_images():
     """测试缺口识别（使用模拟图片）。"""
-    from smu_badminton.slide_captcha import solve_slide_captcha, decode_base64_image
+    from smu_badminton.slide_captcha import solve_slide_captcha
 
     import cv2
     import base64

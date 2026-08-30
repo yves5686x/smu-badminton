@@ -11,7 +11,7 @@ from fastapi import APIRouter
 from dotenv import load_dotenv
 
 from .server_models import UpdateConfigRequest
-from .config import AUTHORIZED_USERS, BASE_DIR
+from .config import AUTHORIZED_USERS, BASE_DIR, get_frontend_config
 
 logger = logging.getLogger(__name__)
 
@@ -22,10 +22,13 @@ router = APIRouter(prefix="/api", tags=["config"])
 
 @router.get("/config")
 async def get_config():
-    """获取前端配置。"""
-    from . import config as config_module
-    importlib.reload(config_module)
-    return {"ok": True, "data": config_module.get_frontend_config()}
+    """获取前端配置。
+
+    注意：不做 importlib.reload——配置只在 POST /api/config/update 时变化，
+    那边已重载过；GET 侧每请求 reload 既浪费（模块重编译）又有并发风险。
+    函数对象的 __globals__ 指向 config 模块字典，reload 原地更新后这里自然读到新值。
+    """
+    return {"ok": True, "data": get_frontend_config()}
 
 
 @router.post("/config/update")
@@ -71,6 +74,9 @@ async def update_config(req: UpdateConfigRequest):
             from . import config as config_module
             load_dotenv(env_path, override=True)
             importlib.reload(config_module)
+            # 注意：reload 只原地更新 config 模块字典。通过 `from .config import X`
+            # 拿到变量副本的其他模块（如 token_profile）仍持有旧值，
+            # 那些值仅在服务重启后刷新——目前热更新只影响模块内读取的路径。
             logger.info("配置已重载，立即生效")
             return {"ok": True, "data": {"message": "配置已保存并自动重载，立即生效", "path": env_path, "reloaded": True}}
         except Exception as reload_err:

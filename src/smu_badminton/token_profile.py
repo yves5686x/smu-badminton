@@ -89,6 +89,18 @@ def profile_from_claims(claims: Dict[str, Any] | None) -> Dict[str, Any] | None:
     }
 
 
+def token_exp_epoch(access_token: str) -> Optional[float]:
+    """读取 access_token JWT 里的 exp（Unix 秒）。无法解析返回 None。"""
+    claims = decode_jwt_payload(access_token)
+    if not claims:
+        return None
+    exp = claims.get("exp")
+    try:
+        return float(exp) if exp else None
+    except (TypeError, ValueError):
+        return None
+
+
 def _cleanup_profile_cache():
     """清理过期的 profile 缓存项。"""
     now = time.time()

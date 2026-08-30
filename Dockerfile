@@ -27,15 +27,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     g++ \
     && rm -rf /var/lib/apt/lists/*
 
-# 先安装依赖（利用 Docker 层缓存）
+# 先装依赖（利用 Docker 层缓存：src 变更不会触发依赖重装）
 COPY requirements.txt pyproject.toml ./
-COPY src/ /app/src/
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
-    && pip install --no-cache-dir -r requirements.txt \
-    && pip install --no-cache-dir -e .
+    && pip install --no-cache-dir -r requirements.txt
+
+# 再装本包（editable，依赖已满足，秒级完成）
+COPY src/ /app/src/
+RUN pip install --no-cache-dir -e .
 
 # 复制运行时文件
-COPY model/ /app/model/
 COPY templates/ /app/templates/
 COPY static/ /app/static/
 

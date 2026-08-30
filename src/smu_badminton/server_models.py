@@ -3,18 +3,17 @@ Pydantic 模型、中间件和资源锁管理模块。
 """
 import asyncio
 import threading
-import uuid
 import time as _time
 import logging
 from typing import Dict, Tuple, Optional
 
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.requests import Request
-from starlette.responses import Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from .config import RATE_LIMIT_MAX, RATE_LIMIT_WINDOW, RATE_LIMIT_JOBS_MAX, RATE_LIMIT_JOBS_WINDOW
+from .config import (
+    RATE_LIMIT_MAX, RATE_LIMIT_WINDOW, RATE_LIMIT_JOBS_MAX, RATE_LIMIT_JOBS_WINDOW,
+    TRUSTED_PROXIES,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +84,11 @@ class StopByParamsRequest(BaseModel):
     jssj: str = Field(..., pattern=r"^\d{2}:\d{2}$", description="结束时间")
     resources_name: str = Field(..., description="资源名称")
     current_username: str = Field(..., description="当前操作用户名，用于权限验证")
+    access_token: str = Field("", description="调用方 access_token（用于撤销学校侧预约，可选）")
+
+
+class RefreshRequest(BaseModel):
+    username: str = Field(..., description="用户名（凭服务端保存的账号静默重登换取新 token）")
 
 
 class StopJobRequest(BaseModel):
@@ -134,19 +138,38 @@ _metrics: Dict[str, Dict[str, float]] = {}
 _metrics_lock = asyncio.Lock()
 
 
-class MetricsMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
+class MetricsMiddleware:
+    """纯 ASGI 指标中间件。
+
+    不用 BaseHTTPMiddleware：它会给每个请求额外生成一层任务包装，
+    且对流式响应/后台任务的兼容性有坑。这里只统计业务接口，
+    path 数量设上限，避免任意路径扫描把内存字典撑爆。
+    """
+
+    _MAX_PATHS = 512
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        path = scope.get("path", "")
+        tracked = path.startswith("/api/") or path == "/health"
         start = _time.perf_counter()
-        response: Response = await call_next(request)
-        duration = (_time.perf_counter() - start) * 1000.0
-        key = request.url.path
-        async with _metrics_lock:
-            m = _metrics.setdefault(key, {"count": 0.0, "total_ms": 0.0, "max_ms": 0.0})
-            m["count"] += 1.0
-            m["total_ms"] += duration
-            if duration > m["max_ms"]:
-                m["max_ms"] = duration
-        return response
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            if tracked:
+                duration = (_time.perf_counter() - start) * 1000.0
+                async with _metrics_lock:
+                    if path in _metrics or len(_metrics) < self._MAX_PATHS:
+                        m = _metrics.setdefault(path, {"count": 0.0, "total_ms": 0.0, "max_ms": 0.0})
+                        m["count"] += 1.0
+                        m["total_ms"] += duration
+                        if duration > m["max_ms"]:
+                            m["max_ms"] = duration
 
 
 # ============= 限流中间件 =============
@@ -155,10 +178,13 @@ _rate_limits: Dict[str, Dict[str, Tuple[float, float]]] = {}
 _rate_lock = asyncio.Lock()
 
 
-class RateLimitMiddleware(BaseHTTPMiddleware):
-    def __init__(self, app, max_per_window: int = 30, window_sec: int = 10):
-        super().__init__(app)
-        # 从 config 获取限流参数
+class RateLimitMiddleware:
+    """纯 ASGI 限流中间件（固定窗口，按 IP + 路径计数）。"""
+
+    _MAX_TRACKED_IPS = 4096
+
+    def __init__(self, app):
+        self.app = app
         self.default_max = RATE_LIMIT_MAX
         self.default_window = RATE_LIMIT_WINDOW
         self.jobs_max = RATE_LIMIT_JOBS_MAX
@@ -173,15 +199,14 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         }
 
     @staticmethod
-    def _get_client_ip(request: Request) -> str:
+    def _client_ip_from_scope(scope) -> str:
         """获取客户端真实 IP。
 
-        只有在配置了可信代理时才信任 X-Forwarded-For。
+        只有在配置了可信代理时才信任 X-Forwarded-For / X-Real-IP。
         """
-        from .config import TRUSTED_PROXIES
-
         # 获取直接连接的 IP
-        direct_ip = request.client.host if request.client else "unknown"
+        client = scope.get("client")
+        direct_ip = client[0] if client else "unknown"
 
         # 如果没有配置可信代理，直接使用直接连接 IP
         if not TRUSTED_PROXIES:
@@ -191,8 +216,13 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         if direct_ip not in TRUSTED_PROXIES:
             return direct_ip  # 不信任此代理，使用直接 IP
 
+        headers = {
+            k.decode("latin-1").lower(): v.decode("latin-1")
+            for k, v in scope.get("headers", [])
+        }
+
         # 信任此代理，解析 X-Forwarded-For
-        xff = request.headers.get("x-forwarded-for") or request.headers.get("X-Forwarded-For")
+        xff = headers.get("x-forwarded-for")
         if xff:
             # 取最后一个非可信代理的 IP（最接近客户端）
             ips = [ip.strip() for ip in xff.split(",")]
@@ -200,14 +230,27 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 if ip and ip not in TRUSTED_PROXIES:
                     return ip
 
-        xreal = request.headers.get("x-real-ip") or request.headers.get("X-Real-IP")
+        xreal = headers.get("x-real-ip")
         if xreal:
             return xreal.strip()
 
         return direct_ip
 
-    async def dispatch(self, request: Request, call_next):
-        path = request.url.path
+    @staticmethod
+    def _prune_stale(now: float) -> None:
+        """清理全部计数窗口都已过期的 IP 条目。调用者必须持有 _rate_lock。"""
+        stale = [
+            ip for ip, paths in _rate_limits.items()
+            if all(now - ts > RATE_LIMIT_JOBS_WINDOW for _, ts in paths.values())
+        ]
+        for ip in stale:
+            _rate_limits.pop(ip, None)
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        path = scope.get("path", "")
         if path in self.protected_paths or path.startswith("/api/jobs"):
             # 针对 /api/jobs 使用更宽松的限流窗口
             if path.startswith("/api/jobs"):
@@ -217,28 +260,41 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 max_per_window = self.default_max
                 window = self.default_window
 
-            ip = self._get_client_ip(request)
+            ip = self._client_ip_from_scope(scope)
             now = _time.time()
+            limited = False
+            count = 0.0
             async with _rate_lock:
+                # 防 IP 维度内存无限增长：超上限时先清理彻底过期的条目
+                if len(_rate_limits) > self._MAX_TRACKED_IPS:
+                    self._prune_stale(now)
                 user_map = _rate_limits.setdefault(ip, {})
                 count, start_ts = user_map.get(path, (0.0, now))
                 if now - start_ts > window:
                     count, start_ts = 0.0, now
                 count += 1.0
                 user_map[path] = (count, start_ts)
-                if count > max_per_window:
-                    logger.warning(f"429 请求过于频繁 - ip={ip} path={path} count={count} window={window} max={max_per_window}")
-                    # 返回更友好的 JSON 提示（仍然 429）
-                    return JSONResponse(status_code=429, content={
-                        "ok": False,
-                        "error": "请求过于频繁",
-                        "hint": "请求频率超限，请降低轮询频率。",
-                        "limit": max_per_window,
-                        "window_sec": window,
-                        "path": path,
-                        "ip": ip,
-                    })
-        return await call_next(request)
+                limited = count > max_per_window
+
+            if limited:
+                logger.warning(
+                    "429 请求过于频繁 - ip=%s path=%s count=%s window=%s max=%s",
+                    ip, path, count, window, max_per_window,
+                )
+                # 返回更友好的 JSON 提示（仍然 429）
+                resp = JSONResponse(status_code=429, content={
+                    "ok": False,
+                    "error": "请求过于频繁",
+                    "hint": "请求频率超限，请降低轮询频率。",
+                    "limit": max_per_window,
+                    "window_sec": window,
+                    "path": path,
+                    "ip": ip,
+                })
+                await resp(scope, receive, send)
+                return
+
+        await self.app(scope, receive, send)
 
 
 # ============= 资源锁管理 =============
@@ -308,44 +364,6 @@ async def _locks_cleanup():
                 logger.info(f"清理了 {len(expired_tlocks) - 100} 个过期线程锁")
 
 
-# ============= 任务管理（内存级） =============
-
-_jobs: Dict[str, dict] = {}
-_jobs_guard = threading.Lock()
-
-
-def _new_job(resource_key: Tuple[str, str, str, str]) -> str:
-    """创建新任务。"""
-    job_id = uuid.uuid4().hex
-    with _jobs_guard:
-        _jobs[job_id] = {
-            "status": "scheduled",
-            "created_at": _time.time(),
-            "resource_key": resource_key,
-            "logs": ["任务已创建"],
-            "result": None,
-        }
-    return job_id
-
-
-def _set_job(job_id: str, **kwargs):
-    """更新任务状态。"""
-    with _jobs_guard:
-        job = _jobs.get(job_id)
-        if not job:
-            return
-        job.update(kwargs)
-
-
-def _append_log(job_id: str, msg: str):
-    """追加任务日志。"""
-    with _jobs_guard:
-        job = _jobs.get(job_id)
-        if not job:
-            return
-        job.setdefault("logs", []).append(msg)
-
-
 # ============= 可用性缓存 =============
 # 公共缓存：key = bookdate，所有用户共享场地时间槽数据
 _avail_public_cache: Dict[str, Dict[str, object]] = {}
@@ -358,13 +376,12 @@ __all__ = [
     "BookRequest", "BookResponse", "ScheduleRequest", "ScheduleResponse",
     "AvailabilityRequest", "AvailabilityResponse", "JobImmediateRequest", "JobScheduledRequest",
     "JobsListResponse", "LocalBookingRequest", "StopByParamsRequest", "StopJobRequest",
-    "UpdateConfigRequest", "LogoutRequest",
+    "UpdateConfigRequest", "LogoutRequest", "RefreshRequest",
+    "CaptchaRequest", "CaptchaResponse", "LoginRequest", "LoginResponse",
     # 中间件
     "MetricsMiddleware", "RateLimitMiddleware",
     # 锁管理
     "get_resource_lock", "_get_tlock", "_locks_cleanup", "_locks", "_tlocks", "_locks_guard", "_tlocks_guard", "_lock_timestamps", "_LOCK_MAX_AGE_SEC",
-    # 任务管理
-    "_new_job", "_set_job", "_append_log", "_jobs", "_jobs_guard",
     # 可用性缓存
     "_avail_public_cache", "_avail_public_lock", "_avail_public_ttl_sec",
     # 指标

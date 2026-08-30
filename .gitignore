@@ -1,5 +1,6 @@
 # Vibe Coding
 .omc/
+.workbuddy/
 
 # Python
 .venv/
@@ -29,6 +30,10 @@ data/
 
 # Plans (generated during development)
 docs/
+src/smu_badminton/docs/
+
+# ZCode session
+.zcode/
 
 # Temp files
 *.har

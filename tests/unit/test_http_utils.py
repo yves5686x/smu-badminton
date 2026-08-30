@@ -1,11 +1,10 @@
 """HTTP 工具单元测试。"""
-import pytest
 from smu_badminton.http_utils import (
     get_network_time,
     get_current_beijing_time,
     get_target_datetime_from_network,
 )
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 
 
 def test_get_current_beijing_time():
