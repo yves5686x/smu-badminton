@@ -3,27 +3,28 @@ FastAPI 应用主模块。
 
 包含应用创建、生命周期管理、中间件配置和路由挂载。
 """
-from fastapi import FastAPI
-from contextlib import asynccontextmanager
 import asyncio
-import os
 import logging
+import os
+from contextlib import asynccontextmanager
 
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import FileResponse, Response, ORJSONResponse
+from fastapi.responses import FileResponse, ORJSONResponse, Response
 from starlette.staticfiles import StaticFiles
 
-from .server_models import MetricsMiddleware, RateLimitMiddleware, _locks_cleanup
 from .cas_manager import booking_manager
-from .core_utils import init_db_tables, close_db_pool
-from .config import JOB_RETENTION_SEC, BASE_DIR, UVICORN_RELOAD, TRUSTED_PROXIES
+from .config import BASE_DIR, JOB_RETENTION_SEC, TRUSTED_PROXIES, UVICORN_RELOAD
+from .core_utils import close_db_pool, init_db_tables
+from .locks import locks_cleanup
+from .middleware import MetricsMiddleware, RateLimitMiddleware
 
 # 导入路由模块
 from .routes_auth import router as auth_router
 from .routes_booking import router as booking_router
-from .routes_jobs import router as jobs_router
 from .routes_config import router as config_router
+from .routes_jobs import router as jobs_router
 
 # 配置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -43,7 +44,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"加载待处理任务失败: {e}")
 
-    _lock_cleanup_task = asyncio.create_task(_locks_cleanup())
+    _lock_cleanup_task = asyncio.create_task(locks_cleanup())
     _jobs_cleanup_task = asyncio.create_task(_jobs_cleanup())
     _lbookings_cleanup_task = asyncio.create_task(_stale_local_bookings_cleanup())
     try:
@@ -58,7 +59,7 @@ async def lifespan(app: FastAPI):
 
 async def _stale_local_bookings_cleanup():
     """周期清理已过场的本地预约记录（原 GET /local_bookings 内联逻辑，移到后台）。"""
-    from datetime import datetime, timezone, timedelta
+    from datetime import datetime, timedelta, timezone
 
     from .core_utils import get_db_pool
 
@@ -89,6 +90,7 @@ async def _stale_local_bookings_cleanup():
 async def _jobs_cleanup():
     """定期清理历史任务记录。"""
     import time as _time
+
     from .core_utils import get_db_pool
 
     statuses = ("done", "failed", "cancelled", "skipped")
@@ -173,9 +175,12 @@ except Exception as e:
 
 # ============= 入口 =============
 
-if __name__ == "__main__":
-    # 注意：待处理任务由 lifespan 统一加载，这里不重复调用，
-    # 否则 reload 模式下父进程会额外跑一份抢票线程。
+def main():
+    """Console-script 入口（pyproject [project.scripts] smu-badminton）。
+
+    注意：待处理任务由 lifespan 统一加载，这里不重复调用，
+    否则 reload 模式下父进程会额外跑一份抢票线程。
+    """
     import uvicorn
     uvicorn.run(
         "smu_badminton.server_fastapi:app",
@@ -186,3 +191,7 @@ if __name__ == "__main__":
         # 使用可信代理列表，而非 "*"
         forwarded_allow_ips=",".join(TRUSTED_PROXIES) if TRUSTED_PROXIES else ""
     )
+
+
+if __name__ == "__main__":
+    main()

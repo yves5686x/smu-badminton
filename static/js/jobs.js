@@ -328,7 +328,7 @@ async function stopJob(jobId) {
             Toast.success('已停止', '任务停止请求已发送');
             fetchJobs();
         } else {
-            const msg = data?.data?.message || data.error || '未知错误';
+            const msg = data.message || data.error || '未知错误';
             Toast.error('停止失败', msg);
         }
     } catch (e) {

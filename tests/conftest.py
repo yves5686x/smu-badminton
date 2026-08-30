@@ -34,6 +34,7 @@ def client():
     全部集成测试复用同一实例，避免重复构建 app 状态。
     """
     from fastapi.testclient import TestClient
+
     from smu_badminton.server_fastapi import app
     with TestClient(app) as c:
         yield c

@@ -12,7 +12,7 @@
 """
 import base64
 import logging
-from typing import Optional, Tuple, List
+
 import cv2
 import numpy as np
 import requests
@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # 图片加载
 # ---------------------------------------------------------------------------
-def _load_image(image_data: str, unchanged: bool = False) -> Optional[np.ndarray]:
+def _load_image(image_data: str, unchanged: bool = False) -> np.ndarray | None:
     """加载图片，支持 base64、data URI 和 URL 格式。
 
     unchanged=True 保留 alpha 通道（IMREAD_UNCHANGED），用于带透明度的拼图小块。
@@ -33,7 +33,7 @@ def _load_image(image_data: str, unchanged: bool = False) -> Optional[np.ndarray
     return decode_base64_image(image_data, unchanged=unchanged)
 
 
-def _download_image(url: str, unchanged: bool = False) -> Optional[np.ndarray]:
+def _download_image(url: str, unchanged: bool = False) -> np.ndarray | None:
     """下载图片并解码为 OpenCV 格式。"""
     try:
         resp = requests.get(url, timeout=10)
@@ -51,7 +51,7 @@ def _download_image(url: str, unchanged: bool = False) -> Optional[np.ndarray]:
         return None
 
 
-def decode_base64_image(b64_str: str, unchanged: bool = False) -> Optional[np.ndarray]:
+def decode_base64_image(b64_str: str, unchanged: bool = False) -> np.ndarray | None:
     """解码 base64 图片字符串（支持 data URI 格式）。
 
     unchanged=True 时用 IMREAD_UNCHANGED 保留 alpha 通道。
@@ -75,7 +75,7 @@ def solve_slide_captcha(
     background_b64: str,
     template_b64: str,
     debug: bool = False
-) -> Optional[int]:
+) -> int | None:
     """识别滑块验证码缺口 X 坐标（背景图原始像素坐标）。
 
     Args:
@@ -103,7 +103,7 @@ def _find_gap_position(
     bg_img: np.ndarray,
     tpl_img: np.ndarray,
     debug: bool = False
-) -> Optional[int]:
+) -> int | None:
     """主方法（alpha 边缘匹配）优先；置信度过低或失败时退回 4 方法投票。"""
     try:
         primary_x, primary_conf = _solve_alpha_edge(bg_img, tpl_img)
@@ -115,7 +115,7 @@ def _find_gap_position(
             tpl_bgr = (tpl_img[:, :, :3]
                        if (tpl_img.ndim == 3 and tpl_img.shape[2] == 4)
                        else tpl_img)
-            legacy: List[Tuple[int, float, str]] = []
+            legacy: list[tuple[int, float, str]] = []
             for fn, name in ((_method_edge_template, "edge_template"),
                              (_method_color_difference, "color_diff"),
                              (_method_gray_template, "gray_template"),
@@ -183,7 +183,7 @@ def _save_debug_marker(bg_img: np.ndarray, gap_x: int) -> None:
 def _solve_alpha_edge(
     bg_img: np.ndarray,
     tpl_img: np.ndarray
-) -> Tuple[Optional[int], float]:
+) -> tuple[int | None, float]:
     """用 alpha 通道精确定位拼图块，边缘 matchTemplate 找缺口。
 
     gap_x = max_loc[0]（裁出的块左缘 = 缺口左缘，【不加】块内偏移）。
@@ -225,7 +225,7 @@ def _solve_alpha_edge(
         piece_edge = cv2.Canny(cv2.GaussianBlur(piece_gray, (3, 3), 0), 50, 150)
 
         # 三种边缘变体，取最高 matchTemplate 置信度
-        variants: List[Tuple[str, np.ndarray]] = [("full", piece_edge)]
+        variants: list[tuple[str, np.ndarray]] = [("full", piece_edge)]
         if alpha is not None:
             sil = cv2.Canny(cv2.GaussianBlur(piece_alpha, (3, 3), 0), 50, 150)
             variants.append(("alpha", sil))
@@ -262,7 +262,7 @@ def _solve_alpha_edge(
 # 退化方法（fallback）: 以下 4 种旧算法，仅在主方法置信度不足时兜底
 # 已修复 += tpl_contour[0] 重复计数 bug（max_loc[0] 即缺口左缘）。
 # ---------------------------------------------------------------------------
-def _method_edge_template(bg_img: np.ndarray, tpl_img: np.ndarray) -> Tuple[Optional[int], float]:
+def _method_edge_template(bg_img: np.ndarray, tpl_img: np.ndarray) -> tuple[int | None, float]:
     """方法 1: Canny 边缘 + 模板匹配。"""
     try:
         bg_gray = cv2.cvtColor(bg_img, cv2.COLOR_BGR2GRAY)
@@ -288,7 +288,7 @@ def _method_edge_template(bg_img: np.ndarray, tpl_img: np.ndarray) -> Tuple[Opti
         return None, 0.0
 
 
-def _method_color_difference(bg_img: np.ndarray, tpl_img: np.ndarray) -> Tuple[Optional[int], float]:
+def _method_color_difference(bg_img: np.ndarray, tpl_img: np.ndarray) -> tuple[int | None, float]:
     """方法 2: 颜色直方图相似度滑动搜索。"""
     try:
         tpl_gray = cv2.cvtColor(tpl_img, cv2.COLOR_BGR2GRAY)
@@ -333,7 +333,7 @@ def _method_color_difference(bg_img: np.ndarray, tpl_img: np.ndarray) -> Tuple[O
         return None, 0.0
 
 
-def _method_gray_template(bg_img: np.ndarray, tpl_img: np.ndarray) -> Tuple[Optional[int], float]:
+def _method_gray_template(bg_img: np.ndarray, tpl_img: np.ndarray) -> tuple[int | None, float]:
     """方法 3: 多尺度灰度模板匹配。"""
     try:
         bg_gray = cv2.cvtColor(bg_img, cv2.COLOR_BGR2GRAY)
@@ -367,7 +367,7 @@ def _method_gray_template(bg_img: np.ndarray, tpl_img: np.ndarray) -> Tuple[Opti
         return None, 0.0
 
 
-def _method_contour(bg_img: np.ndarray, tpl_img: np.ndarray) -> Tuple[Optional[int], float]:
+def _method_contour(bg_img: np.ndarray, tpl_img: np.ndarray) -> tuple[int | None, float]:
     """方法 4: 背景轮廓检测法。"""
     try:
         bg_gray = cv2.cvtColor(bg_img, cv2.COLOR_BGR2GRAY)
@@ -401,7 +401,7 @@ def _method_contour(bg_img: np.ndarray, tpl_img: np.ndarray) -> Tuple[Optional[i
         return None, 0.0
 
 
-def _get_template_contour(edge_img: np.ndarray) -> Optional[Tuple[int, int, int, int]]:
+def _get_template_contour(edge_img: np.ndarray) -> tuple[int, int, int, int] | None:
     """获取拼图小块的有效轮廓区域（去除透明/空白区域）。"""
     try:
         points = cv2.findNonZero(edge_img)

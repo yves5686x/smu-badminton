@@ -3,13 +3,13 @@
 
 用法:
     # 测试缺口检测（使用本地测试图片）
-    python -m smu_badminton.test_slide_captcha --test-detect
+    python scripts/manual_slide_captcha.py --test-detect
 
     # 测试完整流程（需要有效 token）
-    python -m smu_badminton.test_slide_captcha --test-full --token YOUR_TOKEN
+    python scripts/manual_slide_captcha.py --test-full --token YOUR_TOKEN
 
     # 使用调试模式（保存图片）
-    python -m smu_badminton.test_slide_captcha --test-full --token YOUR_TOKEN --debug
+    python scripts/manual_slide_captcha.py --test-full --token YOUR_TOKEN --debug
 """
 import argparse
 import base64
@@ -321,9 +321,9 @@ def main():
     if not any([args.test_detect, args.test_detect_real, args.test_full, args.test_track]):
         parser.print_help()
         print("\n示例用法:")
-        print("  python -m smu_badminton.test_slide_captcha --test-detect")
-        print("  python -m smu_badminton.test_slide_captcha --test-track")
-        print("  python -m smu_badminton.test_slide_captcha --test-full --token YOUR_TOKEN")
+        print("  python scripts/manual_slide_captcha.py --test-detect")
+        print("  python scripts/manual_slide_captcha.py --test-track")
+        print("  python scripts/manual_slide_captcha.py --test-full --token YOUR_TOKEN")
         return
 
     if args.debug:

@@ -4,32 +4,36 @@
 包含：验证码、登录、登出、权限检查。
 """
 import base64
+import logging
 import threading
 import time as _time
 import uuid
-import logging
-from typing import Dict
 
 from fastapi import APIRouter
 from fastapi.concurrency import run_in_threadpool
 
-from .server_models import (
-    CaptchaRequest, CaptchaResponse,
-    LoginRequest, LoginResponse,
-    LogoutRequest, RefreshRequest,
-)
 from .cas_login import (
-    prepare_login_session,
+    LoginErrorType,
+    attempt_login_with_captcha,
     login_with_auto_captcha,
     login_with_manual_captcha,
-    attempt_login_with_captcha,
-    LoginErrorType,
+    prepare_login_session,
+)
+from .config import AUTHORIZED_USERS, CAS_CAPTCHA_URL, CAS_LOGIN_URL
+from .schemas import (
+    CaptchaRequest,
+    CaptchaResponse,
+    LoginRequest,
+    LoginResponse,
+    LogoutRequest,
+    RefreshRequest,
 )
 from .token_profile import (
-    cache_token_for_user, clear_token_cache, save_user_account,
+    cache_token_for_user,
+    clear_token_cache,
     refresh_token_for_user,
+    save_user_account,
 )
-from .config import CAS_LOGIN_URL, CAS_CAPTCHA_URL, AUTHORIZED_USERS
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +41,7 @@ router = APIRouter(prefix="/api", tags=["auth"])
 
 # ============= 验证码会话存储 =============
 
-_captcha_sessions: Dict[str, dict] = {}
+_captcha_sessions: dict[str, dict] = {}
 _captcha_sessions_lock = threading.Lock()
 
 

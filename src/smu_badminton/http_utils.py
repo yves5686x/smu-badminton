@@ -5,19 +5,20 @@ HTTP 工具模块。
 - HTTP 重试逻辑
 - 网络时间同步
 """
-import requests
-import time
 import logging
-from typing import Any, Dict, Optional
-from datetime import datetime, timezone, timedelta
+import time
+from datetime import UTC, datetime, timedelta, timezone
+from typing import Any
+
+import requests
 
 logger = logging.getLogger(__name__)
 
 
 # ============= HTTP 重试逻辑 =============
 
-def _is_ssl_error(error: Exception) -> bool:
-    """判断是否为 SSL 相关错误。"""
+def is_ssl_error(error: Exception) -> bool:
+    """判断是否为 SSL 相关错误（供本模块与 booking_api 复用）。"""
     error_str = str(error).lower()
     return 'ssl' in error_str or 'eof' in error_str or 'protocol' in error_str
 
@@ -29,7 +30,7 @@ def request_with_retry(
     max_retries: int = 3,
     timeout: int = 8,
     **kwargs
-) -> Optional[requests.Response]:
+) -> requests.Response | None:
     """
     通用 HTTP 请求重试，使用指数退避策略。
 
@@ -63,7 +64,7 @@ def request_with_retry(
                 attempt + 1,
                 max_retries,
             )
-            if _is_ssl_error(e) and attempt >= 1:
+            if is_ssl_error(e) and attempt >= 1:
                 logger.error("SSL error detected, failing fast")
                 break
         # 指数退避: 1s, 2s, 4s...
@@ -76,10 +77,10 @@ def request_with_retry(
 def requests_post_with_retry(
     url: str,
     json: Any,
-    headers: Dict[str, str],
+    headers: dict[str, str],
     max_retries: int = 3,
     timeout: int = 8
-) -> Optional[requests.Response]:
+) -> requests.Response | None:
     """
     带重试的 POST 请求。
 
@@ -107,7 +108,7 @@ def requests_get_with_retry(
     url: str,
     max_retries: int = 3,
     timeout: int = 8
-) -> Optional[requests.Response]:
+) -> requests.Response | None:
     """
     带重试的 GET 请求。
 
@@ -131,15 +132,18 @@ def requests_get_with_retry(
 
 _BEIJING_TZ = timezone(timedelta(hours=8))
 
+# 美团校时接口（get_network_time 与 ClockSync 共用）
+TIME_SYNC_URL = "https://cube.meituan.com/ipromotion/cube/toc/component/base/getServerCurrentTime"
 
-def get_network_time() -> Optional[datetime]:
+
+def get_network_time() -> datetime | None:
     """
     获取网络时间（美团时间服务）。
 
     Returns:
         北京时间 datetime，失败返回 None
     """
-    url = "https://cube.meituan.com/ipromotion/cube/toc/component/base/getServerCurrentTime"
+    url = TIME_SYNC_URL
     try:
         response = requests_get_with_retry(url)
         if response is None:
@@ -148,7 +152,7 @@ def get_network_time() -> Optional[datetime]:
         json_data = response.json()
         timestamp_ms = int(json_data['data'])
         timestamp_s = timestamp_ms / 1000
-        dt_utc = datetime.fromtimestamp(timestamp_s, tz=timezone.utc)
+        dt_utc = datetime.fromtimestamp(timestamp_s, tz=UTC)
         dt_local = dt_utc.astimezone(_BEIJING_TZ)
         return dt_local
     except Exception as e:
@@ -177,7 +181,7 @@ def get_current_beijing_time(max_retries: int = 3) -> datetime:
 
 def get_target_datetime_from_network(
     target_time_str: str,
-    bookdate: Optional[str] = None
+    bookdate: str | None = None
 ) -> datetime:
     """
     计算目标抢票时间。
@@ -221,17 +225,15 @@ class ClockSync:
     关键窗口内不再发出任何非预约请求。
     """
 
-    _SYNC_URL = "https://cube.meituan.com/ipromotion/cube/toc/component/base/getServerCurrentTime"
-
     def __init__(self) -> None:
-        self.offset_sec: Optional[float] = None
+        self.offset_sec: float | None = None
         self.synced_at: float = 0.0
 
-    def _measure_once(self) -> Optional[float]:
+    def _measure_once(self) -> float | None:
         """单次采样：服务器毫秒时间戳 − 本地发包/收包中点。"""
         try:
             t0 = time.time()
-            response = requests.get(self._SYNC_URL, timeout=3)
+            response = requests.get(TIME_SYNC_URL, timeout=3)
             t1 = time.time()
             if response.status_code != 200:
                 return None
@@ -241,7 +243,7 @@ class ClockSync:
             logger.warning("网络对时采样失败: %s", e)
             return None
 
-    def sync(self, samples: int = 3) -> Optional[float]:
+    def sync(self, samples: int = 3) -> float | None:
         """采样多次取中位数作为偏移。全部失败返回 None 并保持旧值。"""
         offsets = []
         for _ in range(samples):

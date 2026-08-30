@@ -4,11 +4,12 @@ import numpy as np
 
 def test_decode_base64_image_valid():
     """测试解码有效的 base64 图片。"""
-    from smu_badminton.slide_captcha import decode_base64_image
+    import base64
 
     # 创建一个小的测试图片并编码为 base64
     import cv2
-    import base64
+
+    from smu_badminton.slide_captcha import decode_base64_image
 
     img = np.zeros((50, 50, 3), dtype=np.uint8)
     _, buf = cv2.imencode(".png", img)
@@ -21,10 +22,11 @@ def test_decode_base64_image_valid():
 
 def test_decode_base64_image_with_data_uri():
     """测试解码带 data URI 前缀的 base64 图片。"""
-    from smu_badminton.slide_captcha import decode_base64_image
+    import base64
 
     import cv2
-    import base64
+
+    from smu_badminton.slide_captcha import decode_base64_image
 
     img = np.zeros((50, 50, 3), dtype=np.uint8)
     _, buf = cv2.imencode(".png", img)
@@ -57,10 +59,11 @@ def test_solve_slide_captcha_invalid_input():
 
 def test_solve_slide_captcha_with_mock_images():
     """测试缺口识别（使用模拟图片）。"""
-    from smu_badminton.slide_captcha import solve_slide_captcha
+    import base64
 
     import cv2
-    import base64
+
+    from smu_badminton.slide_captcha import solve_slide_captcha
 
     # 创建背景图（200x50，左侧有一个白色矩形缺口区域）
     bg = np.zeros((50, 200, 3), dtype=np.uint8)

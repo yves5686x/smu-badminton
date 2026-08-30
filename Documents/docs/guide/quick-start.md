@@ -24,10 +24,10 @@ cd smu-badminton
 pip install -e .
 ```
 
-或使用 requirements.txt 安装：
+开发测试依赖（pytest / ruff 等）：
 
 ```bash
-pip install -r requirements.txt
+pip install -e ".[dev]"
 ```
 
 > 若使用 [uv](https://github.com/astral-sh/uv) 管理环境，用 `uv sync` 同步依赖。

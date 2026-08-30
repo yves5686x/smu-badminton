@@ -9,9 +9,9 @@ import pytest
 
 from smu_badminton.cas_manager import get_token_cached, resolve_login_credentials
 from smu_badminton.token_profile import (
-    save_user_account,
-    delete_user_account,
     clear_token_cache,
+    delete_user_account,
+    save_user_account,
 )
 
 

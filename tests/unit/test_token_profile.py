@@ -1,9 +1,9 @@
 """Token 缓存和刷新单元测试。"""
 from smu_badminton.token_profile import (
     cache_token_for_user,
-    get_cached_token,
-    find_user_by_access_token,
     clear_token_cache,
+    find_user_by_access_token,
+    get_cached_token,
 )
 
 

@@ -28,7 +28,14 @@ tests/
 docs/
 .claude/
 scripts/
-*.md
+# README.md 是构建必需（pyproject readme 引用），只排除无关 md/文档
+CLAUDE.md
+Documents/
+src/smu_badminton/docs/
+
+# CI 与会话
+.github/
+.zcode/
 
 # 调试和临时文件
 *.log

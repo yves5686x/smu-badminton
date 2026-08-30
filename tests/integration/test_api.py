@@ -49,7 +49,7 @@ def test_index(client):
 
 def test_book_without_credentials(client):
     """免密预约：请求不带密码且服务端无保存账号时应明确报错。"""
-    from smu_badminton.token_profile import get_user_account, delete_user_account
+    from smu_badminton.token_profile import delete_user_account, get_user_account
 
     username = "test_nocred_user"
     delete_user_account(username)  # 确保无保存账号

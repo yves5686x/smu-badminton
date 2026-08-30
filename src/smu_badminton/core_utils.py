@@ -1,4 +1,4 @@
-﻿"""
+"""
 核心工具模块 - 统一的错误处理和数据库管理
 
 设计理念：
@@ -14,9 +14,10 @@ import os
 import sqlite3
 import threading
 import time
-from functools import wraps
-from typing import Optional, Callable, Any, TypeVar
+from collections.abc import Callable
 from contextlib import contextmanager
+from functools import wraps
+from typing import Any, Optional, TypeVar
 
 from .config import SECRET_KEY
 
@@ -28,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 class BookingError(Exception):
     """预约系统基础异常"""
-    def __init__(self, message: str, code: str = "UNKNOWN_ERROR", details: Optional[dict] = None):
+    def __init__(self, message: str, code: str = "UNKNOWN_ERROR", details: dict | None = None):
         self.message = message
         self.code = code
         self.details = details or {}
@@ -37,21 +38,8 @@ class BookingError(Exception):
 
 class DatabaseError(BookingError):
     """数据库操作异常"""
-    def __init__(self, message: str, details: Optional[dict] = None):
+    def __init__(self, message: str, details: dict | None = None):
         super().__init__(message, "DATABASE_ERROR", details)
-
-
-class LoginError(BookingError):
-    """登录失败异常"""
-    def __init__(self, message: str, details: Optional[dict] = None):
-        super().__init__(message, "LOGIN_ERROR", details)
-
-
-class ResourceLockedError(BookingError):
-    """资源被锁定异常"""
-    def __init__(self, message: str = "资源正在被其他请求处理", details: Optional[dict] = None):
-        super().__init__(message, "RESOURCE_LOCKED", details)
-
 
 
 
@@ -124,15 +112,15 @@ def db_operation(func: Callable) -> Callable:
         except sqlite3.IntegrityError as e:
             # UNIQUE 约束失败等
             logger.warning(f"数据库完整性错误 - {func.__name__}: {str(e)}")
-            raise DatabaseError(f"数据冲突: {str(e)}", {"type": "integrity_error"})
+            raise DatabaseError(f"数据冲突: {str(e)}", {"type": "integrity_error"}) from e
         except sqlite3.OperationalError as e:
             # 数据库锁定、表不存在等
             logger.error(f"数据库操作错误 - {func.__name__}: {str(e)}")
-            raise DatabaseError(f"数据库操作失败: {str(e)}", {"type": "operational_error"})
+            raise DatabaseError(f"数据库操作失败: {str(e)}", {"type": "operational_error"}) from e
         except sqlite3.Error as e:
             # 其他数据库错误
             logger.error(f"数据库未知错误 - {func.__name__}: {str(e)}")
-            raise DatabaseError(f"数据库错误: {str(e)}", {"type": "unknown_db_error"})
+            raise DatabaseError(f"数据库错误: {str(e)}", {"type": "unknown_db_error"}) from e
     return wrapper
 
 
@@ -153,6 +141,7 @@ class DatabasePool:
         self.max_retries = max_retries
         self._local = threading.local()  # 每个线程独立的存储
         self._lock = threading.Lock()
+        self._connections: list = []  # 全部线程连接的注册表（close_all 用）
         logger.info(f"数据库连接池已创建: {db_path}")
     
     def _get_connection(self) -> sqlite3.Connection:
@@ -185,6 +174,8 @@ class DatabasePool:
                 conn.execute("PRAGMA cache_size=-64000;")  # 64MB 缓存
                 
                 logger.debug(f"数据库连接已创建 (线程: {threading.current_thread().name})")
+                with self._lock:
+                    self._connections.append(conn)
                 return conn
             except sqlite3.OperationalError as e:
                 last_error = e
@@ -231,14 +222,22 @@ class DatabasePool:
             return conn.execute(sql, params)
     
     def close_all(self):
-        """关闭所有连接（应用关闭时调用）"""
-        if hasattr(self._local, 'connection') and self._local.connection:
+        """关闭所有线程的连接（应用关闭时调用）。
+
+        threading.local 的连接只在各自线程可见，靠注册表统一关闭，
+        否则工作线程（抢票 worker、run_in_threadpool）的连接会泄漏到进程退出。
+        """
+        with self._lock:
+            connections, self._connections = self._connections, []
+        for conn in connections:
             try:
-                self._local.connection.close()
-                self._local.connection = None
-                logger.info("数据库连接已关闭")
+                conn.close()
             except Exception as e:
                 logger.warning(f"关闭数据库连接失败: {e}")
+        if connections:
+            logger.info(f"已关闭 {len(connections)} 个数据库连接")
+        if hasattr(self._local, "connection"):
+            self._local.connection = None
 
 
 # ============= 统一的响应格式 =============
@@ -257,7 +256,7 @@ def success_response(data: Any = None, message: str = "操作成功") -> dict:
 
 _db_pool_instance: Optional['DatabasePool'] = None
 _db_pool_lock = threading.Lock()
-_db_pool_path: Optional[str] = None  # 记录已初始化的路径
+_db_pool_path: str | None = None  # 记录已初始化的路径
 
 
 def get_db_pool(db_path: str = None) -> 'DatabasePool':

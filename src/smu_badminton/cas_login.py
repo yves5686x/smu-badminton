@@ -9,24 +9,24 @@ CAS 认证流程模块。
 - 所有公开函数参数顺序：必需参数在前，可选参数在后
 """
 import base64
-import re
-import requests
-from urllib.parse import urlparse, parse_qs, urlencode, quote, urljoin, unquote
-from lxml import html
-from .cas_ocr import predict_validate_code
-import os
-import time
 import logging
-from typing import Dict, Tuple, Optional
-from enum import Enum
+import os
+import re
+import time
 from dataclasses import dataclass
+from enum import Enum
+from urllib.parse import parse_qs, quote, unquote, urlencode, urljoin, urlparse
 
+import requests
+from lxml import html
+
+from .cas_ocr import predict_validate_code
 from .config import (
-    WF_ORIGIN,
-    WF_HOME_URL,
-    CAS_ORIGIN,
     CAS_CAPTCHA_URL,
+    CAS_ORIGIN,
     OAUTH_CLIENT_ID,
+    WF_HOME_URL,
+    WF_ORIGIN,
 )
 
 logger = logging.getLogger(__name__)
@@ -52,8 +52,8 @@ class LoginResult:
         message: 错误信息
     """
     error_type: LoginErrorType = LoginErrorType.UNKNOWN_ERROR
-    tokens: Optional[Dict[str, str]] = None
-    session: Optional[requests.Session] = None
+    tokens: dict[str, str] | None = None
+    session: requests.Session | None = None
     message: str = ""
 
     @property
@@ -162,7 +162,7 @@ def follow_redirects(session, start_url):
     return current_url, ""
 
 
-def extract_oidc_tokens(url: str) -> Optional[Dict[str, str]]:
+def extract_oidc_tokens(url: str) -> dict[str, str] | None:
     """
     从 URL 的 fragment 或 query 参数中提取 OIDC token。
 
@@ -173,7 +173,7 @@ def extract_oidc_tokens(url: str) -> Optional[Dict[str, str]]:
         包含 access_token 和 id_token 的字典，失败返回 None（不返回空字典）
     """
     parsed_url = urlparse(url)
-    tokens: Dict[str, str] = {}
+    tokens: dict[str, str] = {}
 
     # 检查 URL fragment 是否包含 token
     if parsed_url.fragment:
@@ -194,7 +194,7 @@ def extract_oidc_tokens(url: str) -> Optional[Dict[str, str]]:
     return tokens if tokens else None
 
 
-def _extract_tokens_after_login(session: requests.Session, cas_login_url: str, post_resp: requests.Response) -> Optional[Dict]:
+def _extract_tokens_after_login(session: requests.Session, cas_login_url: str, post_resp: requests.Response) -> dict | None:
     """从登录响应中提取 OIDC tokens。
 
     处理两种情况：
@@ -258,7 +258,7 @@ def _derive_captcha_url(cas_login_url: str, captcha_url: str | None) -> str:
     return CAS_CAPTCHA_URL
 
 
-def _fetch_captcha_challenge(session: requests.Session, captcha_url: str, headers: dict | None = None) -> Tuple[bytes, str]:
+def _fetch_captcha_challenge(session: requests.Session, captcha_url: str, headers: dict | None = None) -> tuple[bytes, str]:
     """获取验证码挑战，返回 (image_bytes, token)。
 
     新版 /cas/captcha 返回 JSON: {"image":"data:image/png;base64,...","token":"v1...","expiresAt":<ms>}；
@@ -292,7 +292,7 @@ def _fetch_captcha_challenge(session: requests.Session, captcha_url: str, header
     return resp.content, ""
 
 
-def _prepare_login_session_core(login_url: str, captcha_url: str | None = None) -> Tuple[requests.Session, str, str, bytes, str, str]:
+def _prepare_login_session_core(login_url: str, captcha_url: str | None = None) -> tuple[requests.Session, str, str, bytes, str, str]:
     """准备登录会话的核心逻辑。
 
     Args:
@@ -350,7 +350,7 @@ def _stable_detect_event_order(html_text: str):
     return ["submit"]
 
 
-def _stable_download_captcha(session: requests.Session, cas_login_url: str, captcha_url: str | None) -> Tuple[str, str]:
+def _stable_download_captcha(session: requests.Session, cas_login_url: str, captcha_url: str | None) -> tuple[str, str]:
     """获取并 OCR 验证码，返回 (code, token)。
 
     验证码 URL 从 cas_login_url 推导以保证同源（见 _derive_captcha_url）。
@@ -428,7 +428,7 @@ def cas_login_stable(login_url, captcha_url, username, password) -> LoginResult:
     return LoginResult(last_error_type, session=session or requests.Session(), message=last_message)
 
 
-def login_with_retry(login_url, captcha_url, username, password, max_retries=3) -> Optional[Dict]:
+def login_with_retry(login_url, captcha_url, username, password, max_retries=3) -> dict | None:
     """带重试的登录。返回 tokens 或 None。
 
     总尝试次数 = max_retries × 3 (cas_login_stable 内部重试)
@@ -495,7 +495,7 @@ def _detect_login_error(html_text: str) -> LoginErrorType:
     return LoginErrorType.UNKNOWN_ERROR
 
 
-def prepare_login_session(login_url: str, captcha_url: str | None = None) -> Tuple[requests.Session, str, str, bytes, str, str]:
+def prepare_login_session(login_url: str, captcha_url: str | None = None) -> tuple[requests.Session, str, str, bytes, str, str]:
     """准备登录会话，获取验证码图片和必要的参数。
 
     Args:

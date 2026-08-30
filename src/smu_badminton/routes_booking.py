@@ -10,22 +10,28 @@ import time as _time
 from fastapi import APIRouter, Request, Response
 from fastapi.concurrency import run_in_threadpool
 
-from .server_models import (
-    BookRequest, BookResponse,
-    ScheduleRequest, ScheduleResponse,
-    AvailabilityRequest, AvailabilityResponse,
-    LocalBookingRequest,
-    get_resource_lock,
-    _avail_public_cache, _avail_public_lock, _avail_public_ttl_sec,
+from .booking_api import (
+    _build_my_bookings_map,
+    _fetch_all_time_slots,
+    _merge_bookings,
+    _shared_session,
+    get_thread_session,
+    list_appointments_for_account,
+    list_resources_by_account,
 )
 from .cas_manager import book_badminton_slot, booking_manager
-from .token_profile import find_user_by_access_token, has_saved_account
-from .booking_api import (
-    list_resources_by_account, _fetch_all_time_slots, _shared_session,
-    _build_my_bookings_map, _merge_bookings, list_appointments_for_account,
-    get_thread_session,
-)
 from .core_utils import get_db_pool
+from .locks import AVAIL_CACHE_TTL_SEC, avail_cache_get, avail_cache_put, get_resource_lock
+from .schemas import (
+    AvailabilityRequest,
+    AvailabilityResponse,
+    BookRequest,
+    BookResponse,
+    LocalBookingRequest,
+    ScheduleRequest,
+    ScheduleResponse,
+)
+from .token_profile import find_user_by_access_token, has_saved_account
 
 logger = logging.getLogger(__name__)
 
@@ -168,9 +174,6 @@ async def api_list_local_bookings(bookdate: str, response: Response, limit: int 
 
 _inflight_slots: dict[str, "asyncio.Task"] = {}
 
-# 公共缓存最多保留的日期数（正常可约日期只有 ~8 个；上限防御任意日期查询刷内存）
-_AVAIL_CACHE_MAX_ENTRIES = 32
-
 
 def _load_public_slots_blocking(token: str, bookdate: str, id_token: str):
     """阻塞式完整查询：资源列表 + 全部时间槽（single-flight 的执行体）。"""
@@ -212,8 +215,8 @@ async def api_availability(req: AvailabilityRequest, request: Request, response:
     now = _time.time()
 
     # 1. 查公共缓存（场地时间槽数据，所有用户共享）
-    public_entry = _avail_public_cache.get(bookdate)
-    if public_entry and now - public_entry["_ts"] < _avail_public_ttl_sec:
+    public_entry = avail_cache_get(bookdate)
+    if public_entry and now - public_entry["_ts"] < AVAIL_CACHE_TTL_SEC:
         # 缓存命中：只需查预约记录（1 个请求），合并 bookedByMe
         logger.info("[缓存] 公共缓存命中: %s", bookdate)
         slots_data = public_entry["data"]
@@ -249,13 +252,7 @@ async def api_availability(req: AvailabilityRequest, request: Request, response:
     if slots_data is None:
         return AvailabilityResponse(ok=False, error="login_failed")
 
-    async with _avail_public_lock:
-        # 淘汰最旧条目控制内存；_ts 用写入时刻（而非请求进入时刻），
-        # 避免慢查询把缓存条目的有效期提前耗尽
-        if len(_avail_public_cache) >= _AVAIL_CACHE_MAX_ENTRIES:
-            oldest = min(_avail_public_cache.items(), key=lambda kv: kv[1].get("_ts", 0))[0]
-            _avail_public_cache.pop(oldest, None)
-        _avail_public_cache[bookdate] = {"data": slots_data, "_ts": _time.time()}
+    await avail_cache_put(bookdate, slots_data)
 
     # 查本人的预约记录，合并 bookedByMe（线程本地复用 Session）
     my_edges = await run_in_threadpool(_list_my_appointments_threaded, token, bookdate, id_token)

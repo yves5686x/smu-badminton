@@ -10,24 +10,26 @@
 - 所有公开函数参数顺序：必需参数在前，可选参数在后（id_token 默认 ""，session 默认 None）
 """
 import base64
+import logging
 import random
-import requests
 import threading
 import time
-import logging
-from typing import Any, Dict, List, Optional, Tuple
-from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import UTC, datetime, timedelta, timezone
+from typing import Any
+
+import requests
 
 from .config import (
-    WF_ORIGIN,
+    BADMINTON_TYPE_ID,
     WF_API_URL,
     WF_CAPTCHA_URL,
-    BADMINTON_TYPE_ID,
+    WF_ORIGIN,
 )
+from .http_utils import is_ssl_error
 from .token_profile import (
-    get_profile_by_access_token,
     build_user_info_from_profile,
+    get_profile_by_access_token,
 )
 
 logger = logging.getLogger(__name__)
@@ -51,7 +53,7 @@ def _bookdate_to_ms(bookdate: str) -> int:
     return int(dt.timestamp() * 1000)
 
 
-def build_headers(token: str) -> Dict[str, str]:
+def build_headers(token: str) -> dict[str, str]:
     """构建 GraphQL 请求的通用 headers。"""
     return {
         "Authorization": f"Bearer {token}",
@@ -73,12 +75,6 @@ def _graphql_url(id_token: str = "") -> str:
     if id_token:
         return f"{WF_API_URL}?id_token_hint={id_token}"
     return WF_API_URL
-
-
-def _is_ssl_error(error: Exception) -> bool:
-    """判断是否为 SSL 相关错误。"""
-    error_str = str(error).lower()
-    return 'ssl' in error_str or 'eof' in error_str or 'protocol' in error_str
 
 
 def _shared_session() -> requests.Session:
@@ -112,11 +108,11 @@ def get_thread_session() -> requests.Session:
 def _make_graphql_request(
     session,
     url: str,
-    headers: Dict[str, str],
-    payload: Dict[str, Any],
+    headers: dict[str, str],
+    payload: dict[str, Any],
     log_name: str = "",
     token: str = ""
-) -> Optional[requests.Response]:
+) -> requests.Response | None:
     """使用共享 Session 发送 GraphQL 请求，带重试和 token 自动刷新。
 
     Args:
@@ -133,7 +129,7 @@ def _make_graphql_request(
     max_retries = 2
     timeout = 10
 
-    def do_request(current_token: str) -> Optional[requests.Response]:
+    def do_request(current_token: str) -> requests.Response | None:
         """执行单次请求。"""
         current_headers = headers.copy()
         if current_token:
@@ -169,27 +165,11 @@ def _make_graphql_request(
             logger.warning("%s failed status=%d, retrying (%d/%d)", log_name, resp.status_code, attempt + 1, max_retries)
         except Exception as e:
             logger.warning("%s exception=%s, retrying (%d/%d)", log_name, e, attempt + 1, max_retries)
-            if _is_ssl_error(e) and attempt >= 1:
+            if is_ssl_error(e) and attempt >= 1:
                 break
         if attempt < max_retries - 1:
             time.sleep(0.3)
     return None
-
-
-# ============= 统一返回结构 =============
-
-class APIResult:
-    """API 调用结果封装。"""
-
-    @staticmethod
-    def success(data: Any = None) -> Dict[str, Any]:
-        """成功响应。"""
-        return {"ok": True, "data": data}
-
-    @staticmethod
-    def error(code: str, message: str) -> Dict[str, Any]:
-        """错误响应。"""
-        return {"ok": False, "code": code, "message": message}
 
 
 # ============= 用户信息获取 =============
@@ -197,8 +177,8 @@ class APIResult:
 def get_user_info_from_appointment(
     token: str,
     id_token: str = "",
-    session: Optional[requests.Session] = None
-) -> Optional[Dict[str, Any]]:
+    session: requests.Session | None = None
+) -> dict[str, Any] | None:
     """
     尝试从已有预约记录中推断用户信息。
 
@@ -293,8 +273,8 @@ def get_user_info_from_appointment(
 def resolve_user_info(
     token: str,
     id_token: str = "",
-    session: Optional[requests.Session] = None
-) -> Optional[Dict[str, Any]]:
+    session: requests.Session | None = None
+) -> dict[str, Any] | None:
     """
     先从 API 获取预约用户信息，失败再回退到 JWT claims。
 
@@ -324,8 +304,8 @@ def find_time_slots_by_resource(
     resources_id: str,
     date_ms: int,
     id_token: str = "",
-    session: Optional[requests.Session] = None
-) -> Optional[Dict[str, Any]]:
+    session: requests.Session | None = None
+) -> dict[str, Any] | None:
     """
     按日期时间戳查询资源时段及可预约数量。
 
@@ -371,11 +351,11 @@ def find_time_slots_by_resource(
 def list_resources_by_account(
     token: str,
     bookdate: str,
-    type_id: Optional[str] = None,
+    type_id: str | None = None,
     id_token: str = "",
     account: str = "",
-    session: Optional[requests.Session] = None
-) -> Optional[List[Dict[str, Any]]]:
+    session: requests.Session | None = None
+) -> list[dict[str, Any]] | None:
     """
     基于 findResourcesAllByAccount 获取指定日期的资源列表（包含时间段）。
 
@@ -433,8 +413,8 @@ def list_appointments_for_account(
     token: str,
     bookdate: str,
     id_token: str = "",
-    session: Optional[requests.Session] = None
-) -> List[Dict[str, Any]]:
+    session: requests.Session | None = None
+) -> list[dict[str, Any]]:
     """
     拉取当前账户在指定日期的预约记录。
 
@@ -496,9 +476,9 @@ def list_appointments_for_account(
         return []
 
 
-def _build_my_bookings_map(my_edges: List[Dict[str, Any]]) -> Dict[Tuple[str, str, str], bool]:
+def _build_my_bookings_map(my_edges: list[dict[str, Any]]) -> dict[tuple[str, str, str], bool]:
     """从预约记录构建 bookedByMe 映射。"""
-    my_map: Dict[Tuple[str, str, str], bool] = {}
+    my_map: dict[tuple[str, str, str], bool] = {}
     for e in my_edges:
         n = e.get('node', {})
         key = (n.get('resources_id', ''), n.get('start_time', ''), n.get('end_time', ''))
@@ -509,10 +489,10 @@ def _build_my_bookings_map(my_edges: List[Dict[str, Any]]) -> Dict[Tuple[str, st
 def _fetch_all_time_slots(
     token: str,
     bookdate: str,
-    resources: List[Dict[str, Any]],
+    resources: list[dict[str, Any]],
     id_token: str = "",
-    session: Optional[requests.Session] = None
-) -> Dict[str, Tuple[str, Optional[Dict[str, Any]]]]:
+    session: requests.Session | None = None
+) -> dict[str, tuple[str, dict[str, Any] | None]]:
     """获取所有场地的可用性数据（不含 bookedByMe）。返回 dict: rid -> (rname, slots_raw)。"""
     if not resources:
         return {}
@@ -520,7 +500,7 @@ def _fetch_all_time_slots(
     date_ms = _bookdate_to_ms(bookdate)
 
     rid_list = [(r.get('id'), r.get('resources_name')) for r in resources if r.get('id')]
-    results_map: Dict[str, Tuple[str, Optional[Dict[str, Any]]]] = {}
+    results_map: dict[str, tuple[str, dict[str, Any] | None]] = {}
     t3 = time.time()
     max_workers = max(1, min(15, len(rid_list)))
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -542,14 +522,14 @@ def _fetch_all_time_slots(
 
 
 def _merge_bookings(
-    slots_data: Dict[str, Tuple[str, Optional[Dict[str, Any]]]],
-    my_map: Dict[Tuple[str, str, str], bool],
-    t0: Optional[float] = None
-) -> List[Dict[str, Any]]:
+    slots_data: dict[str, tuple[str, dict[str, Any] | None]],
+    my_map: dict[tuple[str, str, str], bool],
+    t0: float | None = None
+) -> list[dict[str, Any]]:
     """合并可用性数据和 bookedByMe。"""
-    out: List[Dict[str, Any]] = []
+    out: list[dict[str, Any]] = []
     for rid, (rname, detail) in slots_data.items():
-        slots: List[Dict[str, Any]] = []
+        slots: list[dict[str, Any]] = []
         if detail and 'data' in detail:
             for s in detail['data'].get('findResourcesTimeSlotByResourcesIdAndDate', []):
                 kssj = s.get('kssj')
@@ -573,13 +553,13 @@ def _merge_bookings(
 def check_resource_time_slot_capacity(
     token: str,
     resource_id: str,
-    time_slot_id_list: List[str],
+    time_slot_id_list: list[str],
     book_date: str,
     book_start_time: str,
     book_end_time: str,
     id_token: str = "",
-    session: Optional[requests.Session] = None
-) -> Optional[Dict[str, Any]]:
+    session: requests.Session | None = None
+) -> dict[str, Any] | None:
     """
     检查时段容量是否可约。
 
@@ -631,7 +611,7 @@ def find_resource_detail(
     token: str,
     resource_id: str,
     id_token: str = ""
-) -> Optional[Dict[str, Any]]:
+) -> dict[str, Any] | None:
     """
     获取资源详情，含 open_captcha_verify / capacity 等字段。
 
@@ -678,8 +658,8 @@ def fetch_resource_time_id(
     kssj: str,
     jssj: str,
     id_token: str = "",
-    session: Optional[requests.Session] = None
-) -> Optional[Tuple[str, str, str]]:
+    session: requests.Session | None = None
+) -> tuple[str, str, str] | None:
     """
     获取资源和时间段 ID，以及验证码要求。
 
@@ -724,11 +704,11 @@ def make_appointment(
     id_token: str = "",
     captcha_id: str = "",
     captcha_code: str = "",
-    user_info: Optional[Dict[str, Any]] = None,
-    session: Optional[requests.Session] = None,
+    user_info: dict[str, Any] | None = None,
+    session: requests.Session | None = None,
     allow_retry: bool = True,
     timeout_seconds: int = 8,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     执行预约。
 
@@ -873,7 +853,7 @@ def make_appointment(
 
 # ============= 滑块验证码 API =============
 
-def gen_slide_captcha(token: str) -> Optional[Dict[str, Any]]:
+def gen_slide_captcha(token: str) -> dict[str, Any] | None:
     """
     获取滑块验证码。
 
@@ -1053,9 +1033,9 @@ def check_slide_captcha(
     slide_x: int,
     bg_image_width: int = 300,
     bg_image_height: int = 180,
-    start_time: Optional[str] = None,
-    stop_time: Optional[str] = None,
-) -> Optional[Dict[str, Any]]:
+    start_time: str | None = None,
+    stop_time: str | None = None,
+) -> dict[str, Any] | None:
     """
     校验滑块验证码。
 
@@ -1074,7 +1054,7 @@ def check_slide_captcha(
     from .http_utils import requests_post_with_retry
 
     # 自动生成时间（使用 UTC 时间，带 Z 后缀）
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     if not start_time:
         start_time = now.isoformat(timespec="milliseconds").replace("+00:00", "Z")
     if not stop_time:
@@ -1125,7 +1105,7 @@ def find_my_appointment_id(
     jssj: str,
     resources_name: str = "",
     id_token: str = ""
-) -> Optional[str]:
+) -> str | None:
     """
     在本人有效预约中查找匹配的预约 ID。
 
@@ -1157,7 +1137,7 @@ def check_appointment_cancel_time(
     token: str,
     appointment_id: str,
     id_token: str = ""
-) -> Tuple[bool, str]:
+) -> tuple[bool, str]:
     """查询该预约当前是否允许取消。返回 (allowed, message)。"""
     from .http_utils import requests_post_with_retry
 
@@ -1182,7 +1162,7 @@ def update_appointment_state(
     appointment_id: str,
     reason: str = "无",
     id_token: str = "",
-) -> Tuple[bool, str]:
+) -> tuple[bool, str]:
     """撤销上游预约（state=1）。返回 (success, message)。"""
     from .http_utils import requests_post_with_retry
 
@@ -1227,16 +1207,16 @@ def _aes_cbc_encrypt(key: bytes, iv: bytes, plaintext: bytes) -> bytes:
     except ImportError:
         pass
     try:
-        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
         from cryptography.hazmat.primitives import padding as _pad
+        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
         padder = _pad.PKCS7(algorithms.AES.block_size).padder()
         padded = padder.update(plaintext) + padder.finalize()
         enc = Cipher(algorithms.AES(key), modes.CBC(iv)).encryptor()
         return enc.update(padded) + enc.finalize()
-    except ImportError:
+    except ImportError as e:
         raise RuntimeError(
             "captchaCode 加密需要 pycryptodome 或 cryptography, 请安装: uv pip install pycryptodome"
-        )
+        ) from e
 
 
 def encrypt_captcha_code(captcha_id: str, captcha_code: str) -> str:
@@ -1269,7 +1249,7 @@ def encrypt_captcha_code(captcha_id: str, captcha_code: str) -> str:
         return captcha_code
 
 
-def solve_and_verify_slide_captcha(token: str) -> Optional[Tuple[str, str]]:
+def solve_and_verify_slide_captcha(token: str) -> tuple[str, str] | None:
     """
     自动获取、识别并校验滑块验证码。
 

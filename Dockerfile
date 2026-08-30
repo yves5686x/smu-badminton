@@ -7,7 +7,9 @@ WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    # 与 EXPOSE/HEALTHCHECK 对齐：裸 docker run 不传 SERVER_PORT 也健康
+    SERVER_PORT=5000
 
 # 安装系统依赖
 # - libgl1, libglib2.0-0, libgomp1: OpenCV 运行时
@@ -28,13 +30,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # 先装依赖（利用 Docker 层缓存：src 变更不会触发依赖重装）
-COPY requirements.txt pyproject.toml ./
+# 依赖清单直接从 pyproject.toml 解析——单一依赖源，不需要维护 requirements.txt
+COPY pyproject.toml README.md ./
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
-    && pip install --no-cache-dir -r requirements.txt
+    && python -c "import tomllib; print('\n'.join(tomllib.load(open('pyproject.toml','rb'))['project']['dependencies']))" > /tmp/requirements.txt \
+    && pip install --no-cache-dir -r /tmp/requirements.txt
 
 # 再装本包（editable，依赖已满足，秒级完成）
 COPY src/ /app/src/
-RUN pip install --no-cache-dir -e .
+RUN pip install --no-cache-dir --no-deps -e .
 
 # 复制运行时文件
 COPY templates/ /app/templates/

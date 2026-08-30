@@ -1,5 +1,5 @@
 """密码混淆单元测试。"""
-from smu_badminton.core_utils import obfuscate_password, deobfuscate_password
+from smu_badminton.core_utils import deobfuscate_password, obfuscate_password
 
 
 def test_obfuscate_roundtrip():

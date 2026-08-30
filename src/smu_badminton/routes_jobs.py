@@ -9,15 +9,18 @@ import os
 from fastapi import APIRouter
 from fastapi.responses import FileResponse
 
-from .server_models import (
-    JobImmediateRequest, JobScheduledRequest,
-    JobsListResponse, StopByParamsRequest, StopJobRequest,
-    _metrics, _metrics_lock,
-)
 from .cas_manager import booking_manager
-from .routes_booking import booking_precheck, _insert_local_booking
-from .token_profile import find_user_by_access_token, has_saved_account
 from .config import BASE_DIR
+from .middleware import snapshot_metrics
+from .routes_booking import _insert_local_booking, booking_precheck
+from .schemas import (
+    JobImmediateRequest,
+    JobScheduledRequest,
+    JobsListResponse,
+    StopByParamsRequest,
+    StopJobRequest,
+)
+from .token_profile import find_user_by_access_token, has_saved_account
 
 logger = logging.getLogger(__name__)
 
@@ -113,14 +116,14 @@ async def api_jobs_stop(job_id: str, req: StopJobRequest):
         owner = booking_manager.get_job_owner(job_id)
     except Exception as e:
         logger.warning(f"获取任务所有者失败: {job_id}, {e}")
-        return {"ok": False, "data": {"error": "job_lookup_failed", "message": "无法获取任务信息"}}
+        return {"ok": False, "error": "job_lookup_failed", "message": "无法获取任务信息"}
 
     if owner is None:
-        return {"ok": False, "data": {"error": "job_not_found", "message": "任务不存在"}}
+        return {"ok": False, "error": "job_not_found", "message": "任务不存在"}
 
     if req.current_username != owner:
         logger.warning(f"权限拒绝：用户 {req.current_username} 试图停止 {owner} 的任务 {job_id}")
-        return {"ok": False, "data": {"error": "permission_denied", "message": "无权停止他人的任务"}}
+        return {"ok": False, "error": "permission_denied", "message": "无权停止他人的任务"}
 
     ok = booking_manager.stop_job(job_id)
     return {"ok": ok, "data": {"job_id": job_id}}
@@ -134,7 +137,7 @@ async def api_jobs_stop_by_params(req: StopByParamsRequest):
     """
     if req.current_username != req.username:
         logger.warning(f"用户 {req.current_username} 尝试取消 {req.username} 的任务（权限拒绝）")
-        return {"ok": False, "data": {"error": "permission_denied", "message": "无权取消其他用户的预约任务"}}
+        return {"ok": False, "error": "permission_denied", "message": "无权取消其他用户的预约任务"}
 
     id_token = ""
     if req.access_token:
@@ -156,13 +159,4 @@ async def api_jobs_stop_by_params(req: StopByParamsRequest):
 @router.get("/api/metrics")
 async def api_metrics():
     """获取请求指标。"""
-    async with _metrics_lock:
-        out = {
-            k: {
-                "count": int(v["count"]),
-                "avg_ms": (v["total_ms"] / v["count"]) if v["count"] else 0.0,
-                "max_ms": v["max_ms"]
-            }
-            for k, v in _metrics.items()
-        }
-    return {"ok": True, "data": out}
+    return {"ok": True, "data": await snapshot_metrics()}

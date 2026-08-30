@@ -7,11 +7,11 @@ import importlib
 import logging
 import os
 
-from fastapi import APIRouter
 from dotenv import load_dotenv
+from fastapi import APIRouter
 
-from .server_models import UpdateConfigRequest
 from .config import AUTHORIZED_USERS, BASE_DIR, get_frontend_config
+from .schemas import UpdateConfigRequest
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +46,7 @@ async def update_config(req: UpdateConfigRequest):
         env_path = os.path.join(BASE_DIR, ".env")
 
         if os.path.exists(env_path):
-            with open(env_path, 'r', encoding='utf-8') as f:
+            with open(env_path, encoding='utf-8') as f:
                 lines = f.readlines()
         else:
             lines = []

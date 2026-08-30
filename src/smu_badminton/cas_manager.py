@@ -1,43 +1,47 @@
+import enum
+import logging
 import threading
-from typing import Any, Dict, List, Optional, Tuple
-from enum import Enum
 import time
 import uuid
-import logging
+from typing import Any
+
+from .booking_api import (
+    _shared_session,
+    check_appointment_cancel_time,
+    check_resource_time_slot_capacity,
+    fetch_resource_time_id,
+    find_my_appointment_id,
+    list_appointments_for_account,
+    make_appointment,
+    resolve_user_info,
+    solve_and_verify_slide_captcha,
+    update_appointment_state,
+)
 
 # 从各模块导入
 from .cas_login import login_with_retry
-from .token_profile import (
-    get_cached_token, cache_token_for_user, refresh_token_for_user,
-    token_exp_epoch, get_user_account,
-)
-from .booking_api import (
-    fetch_resource_time_id,
-    make_appointment,
-    list_appointments_for_account,
-    check_resource_time_slot_capacity,
-    solve_and_verify_slide_captcha,
-    resolve_user_info,
-    find_my_appointment_id,
-    check_appointment_cancel_time,
-    update_appointment_state,
-    _shared_session,
-)
-from .http_utils import (
-    get_network_time,
-    get_target_datetime_from_network,
-    ClockSync,
-)
-from .config import CAS_LOGIN_URL, CAS_CAPTCHA_URL
+from .config import CAS_CAPTCHA_URL, CAS_LOGIN_URL
 
 # 导入核心工具模块
 from .core_utils import (
+    db_operation,
+    deobfuscate_password,
     get_db_pool,
     handle_errors,
-    db_operation,
-    success_response,
     obfuscate_password,
-    deobfuscate_password,
+    success_response,
+)
+from .http_utils import (
+    ClockSync,
+    get_network_time,
+    get_target_datetime_from_network,
+)
+from .token_profile import (
+    cache_token_for_user,
+    get_cached_token,
+    get_user_account,
+    refresh_token_for_user,
+    token_exp_epoch,
 )
 
 # 配置日志
@@ -127,7 +131,7 @@ def _sleep_fine(diff_sec: float) -> None:
 def _wait_until(
     target_time,
     wake_delta_sec: float,
-    cancel_event: Optional[threading.Event] = None,
+    cancel_event: threading.Event | None = None,
     now_fn=None
 ) -> bool:
     """等待直到距 target_time 不足 wake_delta_sec 秒。
@@ -168,7 +172,7 @@ def resolve_login_credentials(
     captcha_url: str,
     username: str,
     password: str,
-) -> Optional[Tuple[str, str, str]]:
+) -> tuple[str, str, str] | None:
     """合并请求携带的凭据与服务端保存的账号，返回 (login_url, captcha_url, password)。
 
     请求未带密码时自动回退到服务端保存的凭据（登录成功后自动保存），
@@ -201,7 +205,7 @@ def get_token_cached(
     username: str,
     password: str,
     ttl_seconds: int = 900
-) -> Optional[Dict[str, str]]:
+) -> dict[str, str] | None:
     """
     获取缓存的 token 或重新登录。
 
@@ -243,7 +247,7 @@ def get_token_cached(
 
 # ============= 任务状态机 =============
 
-def _get_slide_captcha(access_token: str) -> Tuple[str, str]:
+def _get_slide_captcha(access_token: str) -> tuple[str, str]:
     """获取滑块验证码（如果需要）。
 
     Returns:
@@ -258,7 +262,7 @@ def _get_slide_captcha(access_token: str) -> Tuple[str, str]:
     return "", ""
 
 
-class JobState(str, Enum):
+class JobState(enum.StrEnum):
     """任务状态枚举。
 
     状态转换规则：
@@ -279,7 +283,7 @@ class JobState(str, Enum):
 TERMINAL_STATES = {JobState.DONE, JobState.FAILED, JobState.SKIPPED, JobState.CANCELLED}
 
 # 允许的状态转换
-VALID_TRANSITIONS: Dict[JobState, set] = {
+VALID_TRANSITIONS: dict[JobState, set] = {
     JobState.SCHEDULED: {JobState.RUNNING, JobState.CANCELLED, JobState.FAILED, JobState.SKIPPED},
     JobState.RUNNING: {JobState.DONE, JobState.FAILED, JobState.SKIPPED},
     JobState.DONE: set(),
@@ -290,7 +294,7 @@ VALID_TRANSITIONS: Dict[JobState, set] = {
 
 
 class BookingJob:
-    def __init__(self, thread: threading.Thread, cancel_event: threading.Event, meta: Dict[str, Any]):
+    def __init__(self, thread: threading.Thread, cancel_event: threading.Event, meta: dict[str, Any]):
         self.thread = thread
         self.cancel_event = cancel_event
         self.meta = meta  # {type: 'immediate'|'scheduled', created_at, params}
@@ -306,7 +310,7 @@ class BookingManager:
     - 结构化日志记录
     """
     def __init__(self) -> None:
-        self._jobs: Dict[str, BookingJob] = {}
+        self._jobs: dict[str, BookingJob] = {}
         self._lock = threading.Lock()
 
         # 使用全局数据库连接池
@@ -315,10 +319,10 @@ class BookingManager:
         logger.info("预约管理器初始化完成")
 
     @handle_errors(default_return=[], log_error=True, error_message="获取任务列表失败")
-    def list_jobs(self) -> List[Dict[str, Any]]:
+    def list_jobs(self) -> list[dict[str, Any]]:
         """获取所有活跃任务列表"""
         with self._lock:
-            out: List[Dict[str, Any]] = []
+            out: list[dict[str, Any]] = []
             for job_id, job in self._jobs.items():
                 # 过滤已结束线程，顺便回收
                 if not job.thread.is_alive() or job.cancel_event.is_set():
@@ -375,7 +379,7 @@ class BookingManager:
         logger.info(f"任务已停止: {job_id}")
         return bool(job) or bool(job_row)
 
-    def _register(self, thread: threading.Thread, cancel_event: threading.Event, meta: Dict[str, Any]) -> str:
+    def _register(self, thread: threading.Thread, cancel_event: threading.Event, meta: dict[str, Any]) -> str:
         job_id = uuid.uuid4().hex
         with self._lock:
             self._jobs[job_id] = BookingJob(thread, cancel_event, meta)
@@ -384,12 +388,12 @@ class BookingManager:
     # ---- 数据库操作方法（使用连接池和装饰器） ----
     
     @db_operation
-    def _persist_job_row(self, job_id: str, *, login_url: str, captcha_url: str, username: str, password: str, bookdate: str, kssj: str, jssj: str, resources_name: str, target_time_str: str, num_threads: int, status: str):
-        """持久化任务到数据库（密码混淆存储）"""
+    def _persist_job_row(self, job_id: str, *, login_url: str, captcha_url: str, username: str, password: str, bookdate: str, kssj: str, jssj: str, resources_name: str, target_time_str: str, num_threads: int, status: str, created_at: float | None = None):
+        """持久化任务到数据库（密码混淆存储；即时预约路径共用此实现）"""
         with self._db_pool.get_connection() as conn:
             conn.execute(
                 "INSERT INTO scheduled_jobs (job_id, login_url, captcha_url, username, password, bookdate, kssj, jssj, resources_name, target_time_str, num_threads, status, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (job_id, login_url, captcha_url, username, obfuscate_password(password), bookdate, kssj, jssj, resources_name, target_time_str, num_threads, status, time.time()),
+                (job_id, login_url, captcha_url, username, obfuscate_password(password), bookdate, kssj, jssj, resources_name, target_time_str, num_threads, status, created_at if created_at is not None else time.time()),
             )
         logger.debug(f"任务已持久化: {job_id}")
 
@@ -445,7 +449,7 @@ class BookingManager:
             return False
 
     @handle_errors(default_return=None, log_error=True)
-    def _get_job_row(self, job_id: str) -> Dict[str, Any] | None:
+    def _get_job_row(self, job_id: str) -> dict[str, Any] | None:
         """获取任务记录"""
         with self._db_pool.get_connection(auto_commit=False) as conn:
             cur = conn.execute(
@@ -470,7 +474,7 @@ class BookingManager:
         return row.get("username") if row else None
 
     @handle_errors(default_return=None, log_error=True, error_message="查询任务详情失败")
-    def get_job_detail(self, job_id: str) -> Optional[Dict[str, Any]]:
+    def get_job_detail(self, job_id: str) -> dict[str, Any] | None:
         """查询单个任务的持久化状态与参数（含已结束的历史任务）。"""
         with self._db_pool.get_connection(auto_commit=False) as conn:
             cur = conn.execute(
@@ -546,7 +550,7 @@ class BookingManager:
         *,
         username: str, bookdate: str, kssj: str, jssj: str, resources_name: str,
         access_token: str = "", id_token: str = "",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         根据预约参数停止任务，并尽力撤销上游已生效的预约。
 
@@ -589,7 +593,7 @@ class BookingManager:
             resources_name=resources_name
         )
 
-        result: Dict[str, Any] = {"stopped": stopped, "upstream_status": "skipped", "message": ""}
+        result: dict[str, Any] = {"stopped": stopped, "upstream_status": "skipped", "message": ""}
 
         # 4. 上游真取消：优先用调用方 token；否则尝试用保存的账号静默重登
         if not access_token:
@@ -631,7 +635,7 @@ class BookingManager:
         return result
 
     @handle_errors(default_return=[], log_error=True, error_message="获取定时任务列表失败")
-    def list_scheduled_jobs(self, username: str | None = None) -> List[Dict[str, Any]]:
+    def list_scheduled_jobs(self, username: str | None = None) -> list[dict[str, Any]]:
         """获取所有任务列表（包括即时任务和定时任务）"""
         with self._db_pool.get_connection(auto_commit=False) as conn:
             if username:
@@ -704,8 +708,8 @@ class BookingManager:
                 resume_job_id=job_id,
             )
 
-    def find_job_ids_by_params(self, *, username: str, bookdate: str, kssj: str, jssj: str, resources_name: str) -> List[str]:
-        matches: List[str] = []
+    def find_job_ids_by_params(self, *, username: str, bookdate: str, kssj: str, jssj: str, resources_name: str) -> list[str]:
+        matches: list[str] = []
         with self._lock:
             for jid, job in self._jobs.items():
                 params = job.meta.get("params", {})
@@ -1010,7 +1014,7 @@ class BookingManager:
 
             # ========== 验证码预取池：一次性凭证，每枪一份，失败自动重试 ==========
             shots = max(1, min(num_threads, MAX_UPSTREAM_BURST))
-            captcha_pool: List[Tuple[str, str]] = []
+            captcha_pool: list[tuple[str, str]] = []
             need_captcha = open_captcha_verify == "1"
             if need_captcha:
                 # 池构建最晚到 T-35s：留出对齐/发射的余量，不再临阵解新码
@@ -1036,7 +1040,7 @@ class BookingManager:
             barrier = threading.Barrier(shots)
             success_event = threading.Event()
             results_lock = threading.Lock()
-            results: List[Dict[str, Any]] = []
+            results: list[dict[str, Any]] = []
 
             def worker(tid: int):
                 creds = captcha_pool[tid] if tid < len(captcha_pool) else ("", "")
@@ -1144,7 +1148,7 @@ def book_badminton_slot(
     kssj: str,
     jssj: str,
     resources_name: str,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Login, locate resource/time, and place a booking once.
 
     Returns the response JSON from the booking API or an error dict.
@@ -1153,10 +1157,19 @@ def book_badminton_slot(
     job_id = uuid.uuid4().hex
     created_at = time.time()
 
+    def _record(status: str) -> None:
+        """把本次即时预约的结果落库（与定时任务共用同一持久化实现）。"""
+        booking_manager._persist_job_row(
+            job_id, login_url=login_url, captcha_url=captcha_url, username=username,
+            password=password, bookdate=bookdate, kssj=kssj, jssj=jssj,
+            resources_name=resources_name, target_time_str="", num_threads=1,
+            status=status, created_at=created_at,
+        )
+
     tokens = get_token_cached(login_url, captcha_url, username, password, ttl_seconds=900)
     if not tokens or not tokens.get("access_token"):
         # 登录失败也记录
-        _save_job_record(job_id, login_url, captcha_url, username, password, bookdate, kssj, jssj, resources_name, "", 1, "failed", created_at)
+        _record("failed")
         return {"ok": False, "error": "login_failed"}
 
     access_token = tokens["access_token"]
@@ -1169,7 +1182,7 @@ def book_badminton_slot(
         try:
             my_edges = list_appointments_for_account(access_token, bookdate, id_token=id_token, session=session)
             if my_edges:
-                _save_job_record(job_id, login_url, captcha_url, username, password, bookdate, kssj, jssj, resources_name, "", 1, "skipped", created_at)
+                _record("skipped")
                 return {"ok": False, "error": "user_already_booked_today"}
         except Exception:
             pass
@@ -1177,7 +1190,7 @@ def book_badminton_slot(
         result = fetch_resource_time_id(access_token, bookdate, resources_name, kssj, jssj, id_token=id_token, session=session)
         if not result:
             logger.warning("fetch_resource_time_id 返回 None: bookdate=%s, resources_name=%s, kssj=%s, jssj=%s", bookdate, resources_name, kssj, jssj)
-            _save_job_record(job_id, login_url, captcha_url, username, password, bookdate, kssj, jssj, resources_name, "", 1, "failed", created_at)
+            _record("failed")
             return {"ok": False, "error": "resource_or_time_not_found"}
 
         resource_id, time_id, open_captcha_verify = result
@@ -1191,7 +1204,7 @@ def book_badminton_slot(
             captcha_id, captcha_code = _get_slide_captcha(access_token)
             if not captcha_id:
                 logger.error("滑块验证码处理失败")
-                _save_job_record(job_id, login_url, captcha_url, username, password, bookdate, kssj, jssj, resources_name, "", 1, "failed", created_at)
+                _record("failed")
                 return {"ok": False, "error": "captcha_verify_failed"}
 
         capacity_result = check_resource_time_slot_capacity(
@@ -1199,7 +1212,7 @@ def book_badminton_slot(
         )
         if capacity_result and capacity_result.get("code") != "0":
             logger.warning("时段容量检查失败: %s", capacity_result)
-            _save_job_record(job_id, login_url, captcha_url, username, password, bookdate, kssj, jssj, resources_name, "", 1, "failed", created_at)
+            _record("failed")
             return {"ok": False, "error": "capacity_check_failed", "detail": capacity_result}
 
         resp_json = make_appointment(access_token, time_id, resource_id, bookdate, kssj, jssj, id_token=id_token, captcha_id=captcha_id, captcha_code=captcha_code, session=session, allow_retry=False, timeout_seconds=8)
@@ -1217,22 +1230,8 @@ def book_badminton_slot(
         status = "failed"
         logger.warning("make_appointment 返回无效响应: %s", resp_json)
 
-    _save_job_record(job_id, login_url, captcha_url, username, password, bookdate, kssj, jssj, resources_name, "", 1, status, created_at)
+    _record(status)
 
     return success_response(resp_json)
-
-
-def _save_job_record(job_id, login_url, captcha_url, username, password, bookdate, kssj, jssj, resources_name, target_time_str, num_threads, status, created_at):
-    """保存任务记录到数据库（密码混淆存储）"""
-    try:
-        with get_db_pool().get_connection() as conn:
-            conn.execute(
-                """INSERT INTO scheduled_jobs
-                   (job_id, login_url, captcha_url, username, password, bookdate, kssj, jssj, resources_name, target_time_str, num_threads, status, created_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (job_id, login_url, captcha_url, username, obfuscate_password(password), bookdate, kssj, jssj, resources_name, target_time_str, num_threads, status, created_at),
-            )
-    except Exception as e:
-        logger.warning(f"写入任务记录失败: {e}")
 
 

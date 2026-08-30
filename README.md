@@ -72,11 +72,7 @@ pip install -e .
 pip install -e ".[dev]"
 ```
 
-也可以使用：
-
-```bash
-pip install -r requirements.txt
-```
+> 依赖清单统一维护在 `pyproject.toml`（运行依赖见 `[project].dependencies`），无单独的 requirements.txt。
 
 > 若使用 [uv](https://github.com/astral-sh/uv) 管理环境，用 `uv sync` 同步运行依赖，`uv sync --extra dev` 同步含测试依赖。
 

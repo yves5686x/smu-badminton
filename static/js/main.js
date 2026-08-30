@@ -949,7 +949,7 @@ async function handleDialogConfirm() {
                 });
                 const data = await resp.json();
                 if (!data.ok) {
-                    Toast.error('取消失败', data.data?.message || data.data?.error || '无权取消此任务');
+                    Toast.error('取消失败', data.message || data.error || '无权取消此任务');
                     return;
                 }
                 stopData = data.data || {};

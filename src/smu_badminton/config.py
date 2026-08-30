@@ -10,7 +10,6 @@ from urllib.parse import quote, urlencode
 
 from dotenv import load_dotenv
 
-
 # Load .env in project root (src/smu_badminton/../../.env)
 env_path = Path(__file__).parent.parent.parent / ".env"
 load_dotenv(env_path)

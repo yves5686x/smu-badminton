@@ -7,23 +7,23 @@ Token 缓存模块。
 - Profile 缓存
 - 用户账号保存
 """
-import time
-import json
 import base64
-import threading
+import json
 import logging
-from typing import Any, Dict, Optional, Tuple
+import threading
+import time
+from typing import Any
 
 from .config import (
-    TOKEN_PROFILE_TTL_SEC,
-    TOKEN_CACHE_TTL_SEC,
-    CAS_LOGIN_URL,
     CAS_CAPTCHA_URL,
+    CAS_LOGIN_URL,
     DEFAULT_DEPT_CODE,
     DEFAULT_DEPT_NAME,
     DEFAULT_DEPT_NAME_EN,
     DEFAULT_USER_EMAIL,
     DEFAULT_USER_PHONE,
+    TOKEN_CACHE_TTL_SEC,
+    TOKEN_PROFILE_TTL_SEC,
 )
 
 logger = logging.getLogger(__name__)
@@ -31,17 +31,17 @@ logger = logging.getLogger(__name__)
 
 # ============= Token 缓存 =============
 
-_TOKEN_CACHE: Dict[str, Dict[str, Any]] = {}
+_TOKEN_CACHE: dict[str, dict[str, Any]] = {}
 _TOKEN_LOCK = threading.Lock()
 
 
 # ============= Profile 缓存 =============
 
-_TOKEN_PROFILE_CACHE: Dict[str, Dict[str, Any]] = {}
+_TOKEN_PROFILE_CACHE: dict[str, dict[str, Any]] = {}
 _TOKEN_PROFILE_LOCK = threading.Lock()
 
 
-def decode_jwt_payload(token: str) -> Dict[str, Any] | None:
+def decode_jwt_payload(token: str) -> dict[str, Any] | None:
     """解析 JWT payload（不校验签名）。"""
     try:
         parts = token.split(".")
@@ -56,7 +56,7 @@ def decode_jwt_payload(token: str) -> Dict[str, Any] | None:
         return None
 
 
-def profile_from_claims(claims: Dict[str, Any] | None) -> Dict[str, Any] | None:
+def profile_from_claims(claims: dict[str, Any] | None) -> dict[str, Any] | None:
     """从 JWT claims 提取用户 profile。"""
     if not claims:
         return None
@@ -89,7 +89,7 @@ def profile_from_claims(claims: Dict[str, Any] | None) -> Dict[str, Any] | None:
     }
 
 
-def token_exp_epoch(access_token: str) -> Optional[float]:
+def token_exp_epoch(access_token: str) -> float | None:
     """读取 access_token JWT 里的 exp（Unix 秒）。无法解析返回 None。"""
     claims = decode_jwt_payload(access_token)
     if not claims:
@@ -114,7 +114,7 @@ def _cleanup_profile_cache():
         logger.debug("清理了 %d 个过期 token profile 缓存", len(expired))
 
 
-def cache_profile_from_tokens(tokens: Dict[str, Any] | None):
+def cache_profile_from_tokens(tokens: dict[str, Any] | None):
     """从 tokens 缓存用户 profile。"""
     if not tokens:
         return
@@ -134,7 +134,7 @@ def cache_profile_from_tokens(tokens: Dict[str, Any] | None):
         _TOKEN_PROFILE_CACHE[access_token] = {"profile": profile, "ts": time.time()}
 
 
-def get_profile_by_access_token(access_token: str) -> Dict[str, Any] | None:
+def get_profile_by_access_token(access_token: str) -> dict[str, Any] | None:
     """通过 access_token 获取缓存的 profile。"""
     now = time.time()
     with _TOKEN_PROFILE_LOCK:
@@ -144,7 +144,7 @@ def get_profile_by_access_token(access_token: str) -> Dict[str, Any] | None:
     return profile_from_claims(decode_jwt_payload(access_token))
 
 
-def build_user_info_from_profile(profile: Dict[str, Any] | None) -> Dict[str, Any] | None:
+def build_user_info_from_profile(profile: dict[str, Any] | None) -> dict[str, Any] | None:
     """从 profile 构建预约所需的用户信息结构。"""
     if not profile:
         return None
@@ -208,7 +208,7 @@ def _cleanup_token_cache(now: float, ttl_seconds: float) -> None:
         logger.debug("清理了 %d 个过期 token 缓存", len(expired_users))
 
 
-def get_cached_token(username: str, ttl_seconds: int = None) -> Optional[Dict[str, str]]:
+def get_cached_token(username: str, ttl_seconds: int = None) -> dict[str, str] | None:
     """
     获取缓存的 token（不触发登录）。
 
@@ -231,7 +231,7 @@ def get_cached_token(username: str, ttl_seconds: int = None) -> Optional[Dict[st
     return None
 
 
-def cache_token_for_user(username: str, tokens: Dict[str, Any]) -> None:
+def cache_token_for_user(username: str, tokens: dict[str, Any]) -> None:
     """
     缓存用户的 token（登录成功后调用）。
 
@@ -244,7 +244,7 @@ def cache_token_for_user(username: str, tokens: Dict[str, Any]) -> None:
     cache_profile_from_tokens(tokens)
 
 
-def find_user_by_access_token(access_token: str) -> Tuple[str, str]:
+def find_user_by_access_token(access_token: str) -> tuple[str, str]:
     """
     通过 access_token 查找用户名和 id_token。
 
@@ -262,7 +262,7 @@ def find_user_by_access_token(access_token: str) -> Tuple[str, str]:
     return "", ""
 
 
-def clear_token_cache(username: Optional[str] = None) -> None:
+def clear_token_cache(username: str | None = None) -> None:
     """
     清理 token 缓存。
 
@@ -333,7 +333,7 @@ def save_user_account(
         return False
 
 
-def get_user_account(username: str) -> Optional[Dict[str, str]]:
+def get_user_account(username: str) -> dict[str, str] | None:
     """
     获取保存的用户账号信息。
 
@@ -343,7 +343,7 @@ def get_user_account(username: str) -> Optional[Dict[str, str]]:
     Returns:
         包含 username, password（明文）, login_url, captcha_url 的字典，未找到返回 None
     """
-    from .core_utils import get_db_pool, deobfuscate_password
+    from .core_utils import deobfuscate_password, get_db_pool
 
     if not username:
         return None
@@ -403,7 +403,7 @@ def has_saved_account(username: str) -> bool:
         return False
 
 
-def refresh_token_for_user(username: str, max_attempts: int = 2) -> Optional[Dict[str, str]]:
+def refresh_token_for_user(username: str, max_attempts: int = 2) -> dict[str, str] | None:
     """
     刷新用户 token（从数据库获取账号密码并重新登录）。
 

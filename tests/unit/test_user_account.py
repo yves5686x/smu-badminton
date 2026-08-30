@@ -1,10 +1,9 @@
 """用户账号保存单元测试。"""
-import pytest
 from smu_badminton.token_profile import (
-    save_user_account,
-    get_user_account,
     delete_user_account,
+    get_user_account,
     has_saved_account,
+    save_user_account,
 )
 
 
