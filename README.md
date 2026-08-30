@@ -101,10 +101,12 @@ BADMINTON_TYPE_ID=93c2a115-5c73-4e30-bb6a-dfcc5404e46f
 生产或多人使用时，额外建议设置：
 
 ```env
-SECRET_KEY=replace-this-with-your-own-secret
 AUTHORIZED_USERS=202540510004
 TRUSTED_PROXIES=127.0.0.1
 ```
+
+> `SECRET_KEY` 无需手动设置：未配置时首次启动自动生成随机密钥并持久化到
+> `DATA_DIR/secret_key`，重启复用；仅在多实例共享数据库等场景才需要显式指定。
 
 > CAS 登录页已由 `cas.shmtu.edu.cn` 迁至 `sso.shmtu.edu.cn`，验证码接口 `/cas/captcha`
 > 也随之迁移并改为返回 JSON `{image, token, expiresAt}`。代码会自动按登录页 host
@@ -263,7 +265,9 @@ npm run docs:build
 ## 注意事项
 
 - 验证码识别使用 ddddocr 本地整图识别，无需额外模型文件或远程 OCR 服务。
-- 如果使用默认 `SECRET_KEY`，密码混淆安全性较弱，不适合生产环境。
+- **密码安全**：登录成功后服务端自动保存凭据（XOR+base64 混淆，密钥自动生成），
+  预约/任务接口不再随请求发送密码；前端 localStorage 只存用户名与 token。
+  登录请求仍含一次明文密码（CAS 上游协议决定），公网部署请置于 HTTPS 反代之后。
 - 定时预约任务会落到 SQLite，服务重启后会自动恢复待执行任务。
 - 同一用户同一天只能有一个预约，系统会做本地去重和资源锁保护。
 - 上游对预约接口按账号限流：约 2 连发内安全，第 3 发触发 3 分钟封禁，

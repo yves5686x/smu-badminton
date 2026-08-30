@@ -269,16 +269,18 @@ SMU Badminton 提供 RESTful API，所有接口返回 JSON 格式数据。基础
 
 ```json
 {
-  "login_url": "https://...",             // 必填，CAS 登录 URL
-  "captcha_url": "https://...",           // 必填，验证码 URL
   "username": "202540510004",             // 必填，学号
-  "password": "your_password",            // 必填，密码
   "bookdate": "2025-12-18",              // 必填，预约日期 YYYY-MM-DD
   "kssj": "18:00",                       // 必填，开始时间 HH:MM
   "jssj": "19:00",                       // 必填，结束时间 HH:MM
   "resources_name": "羽毛球13号场地"       // 必填，资源名称
+  // password/login_url/captcha_url 均可省略：
+  // 服务端自动使用登录时保存的凭据与配置默认值（推荐，密码不随请求发送）
 }
 ```
+
+> **免密预约**：登录成功后服务端自动保存凭据（混淆存储），预约/任务接口无需再传密码。
+> 既无请求密码又无保存账号时返回 `no_saved_credentials`（需先调用 `/api/login`）。
 
 **成功响应：**
 
@@ -326,36 +328,18 @@ SMU Badminton 提供 RESTful API，所有接口返回 JSON 格式数据。基础
 
 ```json
 {
-  "login_url": "https://...",             // 必填，CAS 登录 URL
-  "captcha_url": "https://...",           // 必填，验证码 URL
   "username": "202540510004",             // 必填，学号
-  "password": "your_password",            // 必填，密码
   "bookdate": "2025-12-18",              // 必填，预约日期 YYYY-MM-DD
   "kssj": "18:00",                       // 必填，开始时间 HH:MM
   "jssj": "19:00",                       // 必填，结束时间 HH:MM
   "resources_name": "羽毛球13号场地",      // 必填，资源名称
   "target_time_str": "21:00:00",         // 必填，目标开抢时间 HH:MM:SS
   "num_threads": 5,                       // 可选，并发线程数 1-5，默认 5
-  "run_async": true                       // 可选，是否后台异步执行，默认 false
+  // password/login_url/captcha_url 均可省略（服务端使用已保存凭据，见 /api/book 说明）
 }
 ```
 
-**同步模式响应（run_async=false）：**
-
-```json
-{
-  "ok": true,
-  "data": {
-    "threads": 5,
-    "results": [
-      { "thread": 1, "response": { "code": "success" } },
-      { "thread": 2, "response": { "code": "success" } }
-    ]
-  }
-}
-```
-
-**异步模式响应（run_async=true）：**
+**响应（统一后台任务，入队即返回 job_id）：**
 
 ```json
 {
@@ -369,7 +353,8 @@ SMU Badminton 提供 RESTful API，所有接口返回 JSON 格式数据。基础
 
 **说明：**
 - 目标时间 = `bookdate - 7 天 + target_time_str`
-- 异步模式立即返回 `job_id`，可通过 `/api/jobs` 查询任务状态
+- 入队立即返回 `job_id`，可通过 `/api/jobs` 查询任务状态
+- `run_async` 字段仅为兼容旧客户端保留，无实际作用
 - 启动失败时自动回滚本地预约记录
 
 ---

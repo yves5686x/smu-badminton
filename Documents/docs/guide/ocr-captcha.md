@@ -75,7 +75,7 @@ pip install ddddocr
 并依赖灰度二值化（阈值 200）、224x224、ImageNet 均值/标准差倒数预处理。网站换字体后这三个
 自训模型失效（认不出新字体的运算符/数字）且无法重训（无训练设施），固定比例切分对新版面也错位，
 故整体替换为 ddddocr 整图方案。`model/` 目录（gitignored）可能仍存有旧模型文件但不再加载，
-`ncnn` 依赖已从 requirements.txt 移除。
+`ncnn` 依赖已从依赖清单移除。
 
 > 本文档曾描述 local / http / tcp 三种 `OCR_MODE` 远程模式——这些在当前代码中**未实现**，
 > `OCR_MODE` 环境变量不存在，仅有上述本地 ddddocr 单一路径。
