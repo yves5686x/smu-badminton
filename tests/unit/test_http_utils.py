@@ -1,10 +1,17 @@
-"""HTTP 工具单元测试。"""
+"""HTTP 工具单元测试。
+
+依赖外部网络（美团校时接口），标记为 network，CI 用 -m "not network" 跳过。
+"""
+import pytest
+
 from smu_badminton.http_utils import (
     get_network_time,
     get_current_beijing_time,
     get_target_datetime_from_network,
 )
 from datetime import datetime
+
+pytestmark = pytest.mark.network
 
 
 def test_get_current_beijing_time():

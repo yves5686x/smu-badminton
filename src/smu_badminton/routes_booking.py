@@ -19,7 +19,7 @@ from .server_models import (
     _avail_public_cache, _avail_public_lock, _avail_public_ttl_sec,
 )
 from .cas_manager import book_badminton_slot, booking_manager
-from .token_profile import find_user_by_access_token
+from .token_profile import find_user_by_access_token, has_saved_account
 from .booking_api import (
     list_resources_by_account, _fetch_all_time_slots, _shared_session,
     _build_my_bookings_map, _merge_bookings, list_appointments_for_account,
@@ -56,21 +56,34 @@ def _delete_local_booking(username: str, bookdate: str, resources_name: str, kss
         logger.warning(f"删除本地预约记录失败: {e}")
 
 
+async def booking_precheck(req: BookRequest) -> tuple[str | None, asyncio.Lock | None]:
+    """预约前置校验（/api/book、/api/book/schedule、/api/jobs/immediate 共用）。
+
+    校验顺序：凭据可用（请求带密码或服务端已保存账号）→ 资源未被占用 → 当日无冲突。
+    返回 (error_code, lock)：error_code 为 None 时可继续，lock 供调用方按需持有。
+    """
+    if not req.password and not has_saved_account(req.username):
+        return "no_saved_credentials", None
+
+    lock = await get_resource_lock((req.resources_name, req.bookdate, req.kssj, req.jssj))
+    if lock.locked():
+        return "resource_locked_processing", lock
+
+    conflict = _day_booking_conflict(req.username, req.bookdate)
+    if conflict:
+        return conflict, lock
+
+    return None, lock
+
+
 # ============= 路由定义 =============
 
 @router.post("/book", response_model=BookResponse)
 async def api_book(req: BookRequest) -> BookResponse:
     """立即预约。"""
-    resource_key = (req.resources_name, req.bookdate, req.kssj, req.jssj)
-    lock = await get_resource_lock(resource_key)
-
-    if lock.locked():
-        return BookResponse(ok=False, error="resource_locked_processing")
-
-    # 检查：同一用户同一天只能预约一个
-    conflict = _day_booking_conflict(req.username, req.bookdate)
-    if conflict:
-        return BookResponse(ok=False, error=conflict)
+    error, lock = await booking_precheck(req)
+    if error:
+        return BookResponse(ok=False, error=error)
 
     async with lock:
         err = _insert_local_booking(req.username, req.bookdate, req.resources_name, req.kssj, req.jssj)
@@ -94,16 +107,9 @@ async def api_book(req: BookRequest) -> BookResponse:
 @router.post("/book/schedule", response_model=ScheduleResponse)
 async def api_book_schedule(req: ScheduleRequest) -> ScheduleResponse:
     """定时预约（统一走后台任务；run_async 字段仅为兼容旧客户端保留）。"""
-    resource_key = (req.resources_name, req.bookdate, req.kssj, req.jssj)
-    lock = await get_resource_lock(resource_key)
-
-    if lock.locked():
-        return ScheduleResponse(ok=False, error="resource_locked_processing")
-
-    # 去重检查：同一用户同一天只能预约一个
-    conflict = _day_booking_conflict(req.username, req.bookdate)
-    if conflict:
-        return ScheduleResponse(ok=False, error=conflict)
+    error, _lock = await booking_precheck(req)
+    if error:
+        return ScheduleResponse(ok=False, error=error)
 
     err = _insert_local_booking(req.username, req.bookdate, req.resources_name, req.kssj, req.jssj)
     if err:

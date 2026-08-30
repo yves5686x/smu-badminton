@@ -18,10 +18,7 @@ def test_import_config():
     assert hasattr(config, 'CAS_ORIGIN')
 
 
-def test_app_health():
-    from fastapi.testclient import TestClient
-    from smu_badminton.server_fastapi import app
-    client = TestClient(app)
+def test_app_health(client):
     response = client.get("/health")
     assert response.status_code == 200
     assert response.json()["ok"] is True

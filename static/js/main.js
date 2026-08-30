@@ -90,6 +90,7 @@ async function loadConfig() {
 }
 
 // ============ 本地存储 ============
+// bb_auth 只存 {username}；密码不进 localStorage（服务端托管凭据）
 const Auth = {
     save(auth) {
         try { localStorage.setItem('bb_auth', JSON.stringify(auth)); } catch(e) {}
@@ -709,8 +710,10 @@ function promptLogin() {
                 const result = await performLogin(u, p, captchaCode);
 
                 if (result.ok) {
-                    // 登录成功，保存 token
-                    window.__auth = { username: u, password: p };
+                    // 登录成功：只保存用户名与 token。
+                    // 密码不落地：服务端登录成功后已保存凭据（混淆存储），
+                    // 后续预约静默复用，前端无需也不再保存密码。
+                    window.__auth = { username: u };
                     window.__token = result.data?.access_token;
                     Auth.save(window.__auth);
                     if (window.__token) {
@@ -756,11 +759,10 @@ function promptLogin() {
             }
         };
 
-        // 预填缓存
+        // 预填缓存（密码不保存，每次登录重新输入）
         const cached = Auth.load();
         if (cached) {
             uEl.value = cached.username || '';
-            pEl.value = cached.password || '';
         }
 
         resetDialog();
@@ -857,16 +859,14 @@ async function handleDialogConfirm() {
     try {
         if (State.dialogAction === 'book') {
             const username = window.__auth?.username;
-            const password = window.__auth?.password;
-            if (!username || !password) {
+            if (!username) {
                 Toast.error('未登录', '请先登录');
                 return;
             }
 
+            // 密码不再随请求发送：服务端用登录时保存的凭据静默完成认证
             const baseBody = {
-                login_url: window.login_url,
-                captcha_url: window.captcha_url,
-                username, password,
+                username,
                 bookdate: date,
                 kssj: `${hour}:00`,
                 jssj: `${end}:00`,
@@ -915,8 +915,8 @@ async function handleDialogConfirm() {
                     await fetchAndRenderBookings(true);
                     return;
                 }
-                // 登录失败（含刷新失败），需要重新登录
-                if (data.error === 'login_failed') {
+                // 登录失败/无保存凭据（含刷新失败），需要重新登录
+                if (data.error === 'login_failed' || data.error === 'no_saved_credentials') {
                     Toast.error('登录失败', '账号或密码错误，请重新登录');
                     Auth.clear();
                     window.__auth = null;
@@ -1115,10 +1115,10 @@ async function init() {
     // 先加载配置
     await loadConfig();
 
-    // 尝试使用缓存登录
+    // 尝试使用缓存登录（只存了用户名与 token；token 失效由静默续期兜底）
     const cached = Auth.load();
     const cachedToken = Auth.loadToken();
-    if (cached && cached.username && cached.password && cachedToken) {
+    if (cached && cached.username && cachedToken) {
         window.__auth = cached;
         window.__token = cachedToken;
     } else {

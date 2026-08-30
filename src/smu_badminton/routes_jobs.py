@@ -12,11 +12,11 @@ from fastapi.responses import FileResponse
 from .server_models import (
     JobImmediateRequest, JobScheduledRequest,
     JobsListResponse, StopByParamsRequest, StopJobRequest,
-    get_resource_lock,
     _metrics, _metrics_lock,
 )
 from .cas_manager import booking_manager
-from .token_profile import find_user_by_access_token
+from .routes_booking import booking_precheck, _insert_local_booking
+from .token_profile import find_user_by_access_token, has_saved_account
 from .config import BASE_DIR
 
 logger = logging.getLogger(__name__)
@@ -45,18 +45,11 @@ async def api_jobs_immediate(req: JobImmediateRequest):
     与同步的 /api/book 共享同一套前置校验与本地占位记录；
     任务失败/跳过时由后台线程回滚占位记录。
     """
-    resource_key = (req.resources_name, req.bookdate, req.kssj, req.jssj)
-    lock = await get_resource_lock(resource_key)
-    if lock.locked():
-        return {"ok": False, "error": "resource_locked_processing"}
+    error, _lock = await booking_precheck(req)
+    if error:
+        return {"ok": False, "error": error}
 
-    conflict = booking_manager.day_booking_conflict(req.username, req.bookdate)
-    if conflict:
-        return {"ok": False, "error": conflict}
-
-    insert_err = booking_manager.add_local_booking(
-        req.username, req.bookdate, req.resources_name, req.kssj, req.jssj
-    )
+    insert_err = _insert_local_booking(req.username, req.bookdate, req.resources_name, req.kssj, req.jssj)
     if insert_err:
         return {"ok": False, "error": insert_err}
 
@@ -71,6 +64,8 @@ async def api_jobs_immediate(req: JobImmediateRequest):
 @router.post("/api/jobs/scheduled", response_model=JobsListResponse)
 async def api_jobs_scheduled(req: JobScheduledRequest):
     """创建定时预约任务。"""
+    if not req.password and not has_saved_account(req.username):
+        return {"ok": False, "error": "no_saved_credentials"}
     job_id = booking_manager.start_scheduled_booking(
         login_url=req.login_url, captcha_url=req.captcha_url, username=req.username,
         password=req.password, bookdate=req.bookdate, kssj=req.kssj, jssj=req.jssj,

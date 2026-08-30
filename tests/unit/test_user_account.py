@@ -4,14 +4,8 @@ from smu_badminton.token_profile import (
     save_user_account,
     get_user_account,
     delete_user_account,
+    has_saved_account,
 )
-from smu_badminton.core_utils import init_db_tables
-
-
-@pytest.fixture(autouse=True)
-def setup_db():
-    """每个测试前初始化数据库。"""
-    init_db_tables()
 
 
 def test_save_and_get_user_account():
@@ -60,6 +54,17 @@ def test_get_nonexistent_user():
     """测试获取不存在的用户。"""
     account = get_user_account("nonexistent_user_xyz")
     assert account is None
+
+
+def test_has_saved_account():
+    """测试保存账号存在性检查。"""
+    username = "test_user_has_saved"
+    assert has_saved_account(username) is False
+    save_user_account(username, "password")
+    assert has_saved_account(username) is True
+    delete_user_account(username)
+    assert has_saved_account(username) is False
+    assert has_saved_account("") is False
 
 
 def test_delete_user_account():

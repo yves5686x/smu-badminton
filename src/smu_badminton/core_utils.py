@@ -378,6 +378,10 @@ def close_db_pool():
 
 # ============= 密码混淆工具 =============
 
+# 混淆格式版本前缀：换钥/旧格式数据解混淆时直接判失效，返回空串
+_OBFUSCATE_PREFIX = "v2:"
+
+
 def obfuscate_password(password: str) -> str:
     """
     混淆密码（可逆）
@@ -387,14 +391,14 @@ def obfuscate_password(password: str) -> str:
         password: 原始密码
 
     Returns:
-        混淆后的字符串
+        混淆后的字符串（带 v2: 版本前缀）
     """
     if not password:
         return ""
     key = SECRET_KEY
     # XOR + base64
     encoded = ''.join(chr(ord(c) ^ ord(key[i % len(key)])) for i, c in enumerate(password))
-    return base64.b64encode(encoded.encode()).decode()
+    return _OBFUSCATE_PREFIX + base64.b64encode(encoded.encode()).decode()
 
 
 def deobfuscate_password(obfuscated: str) -> str:
@@ -405,16 +409,17 @@ def deobfuscate_password(obfuscated: str) -> str:
         obfuscated: 混淆后的字符串
 
     Returns:
-        原始密码，解密失败时返回空字符串
+        原始密码，解密失败（含旧格式/换钥后的历史数据）返回空字符串
 
     Note:
-        解密失败时不返回原文，避免混淆数据被当作密码使用。
+        解密失败时不返回原文，避免混淆数据被当作密码使用；
+        返回空串后上层按"无保存凭据"处理，用户重新登录即可重建。
     """
-    if not obfuscated:
+    if not obfuscated or not obfuscated.startswith(_OBFUSCATE_PREFIX):
         return ""
     key = SECRET_KEY
     try:
-        decoded = base64.b64decode(obfuscated.encode()).decode()
+        decoded = base64.b64decode(obfuscated[len(_OBFUSCATE_PREFIX):].encode()).decode()
         return ''.join(chr(ord(c) ^ ord(key[i % len(key)])) for i, c in enumerate(decoded))
     except Exception as e:
         logger.warning(f"密码解混淆失败: {e}")

@@ -1,8 +1,10 @@
-﻿"""
+"""
 Configuration utilities loaded from .env.
 """
 
+import logging
 import os
+import secrets
 from pathlib import Path
 from urllib.parse import quote, urlencode
 
@@ -43,20 +45,44 @@ TOKEN_PROFILE_TTL_SEC = int(os.getenv("TOKEN_PROFILE_TTL_SEC", "3600"))
 TOKEN_CACHE_TTL_SEC = int(os.getenv("TOKEN_CACHE_TTL_SEC", "900"))
 JOB_RETENTION_SEC = int(os.getenv("JOB_RETENTION_SEC", "3600"))
 
-# ========== Security config ==========
-_SECRET_KEY_DEFAULT = "smu-badminton-default-key"
-SECRET_KEY = os.getenv("SECRET_KEY", _SECRET_KEY_DEFAULT)
+# ========== Data path config ==========
+# Docker 环境使用 /app/data，本地开发使用项目目录下的 data
+DATA_DIR = os.getenv("DATA_DIR", "/app/data" if os.path.exists("/app/data") else str(BASE_DIR / "data"))
 
-# 安全检查：SECRET_KEY 使用默认值时发出警告
-if SECRET_KEY == _SECRET_KEY_DEFAULT:
-    import warnings
-    warnings.warn(
-        "使用默认 SECRET_KEY 不安全！请在 .env 中设置 SECRET_KEY 环境变量。",
-        UserWarning
-    )
-    # 使用 logger 需要先配置
-    import logging
-    logging.getLogger(__name__).warning("警告：使用默认 SECRET_KEY，存储的密码可被轻易解码！")
+# ========== Security config ==========
+
+
+def _load_or_create_secret_key() -> str:
+    """解析 SECRET_KEY：env 优先；否则自动生成随机密钥并持久化到 DATA_DIR/secret_key。
+
+    持久化后重启复用同一密钥，无需手动配置即可避免源码里的公开默认钥；
+    持久化失败（目录只读等）时退回进程内随机密钥并警告（重启后保存的凭据失效，
+    用户重新登录即可重建）。密钥变更后旧混淆数据按失效处理（deobfuscate 返回空）。
+    """
+    env_key = os.getenv("SECRET_KEY", "").strip()
+    if env_key:
+        return env_key
+
+    key_path = Path(DATA_DIR) / "secret_key"
+    try:
+        if key_path.exists():
+            cached = key_path.read_text(encoding="utf-8").strip()
+            if cached:
+                return cached
+        key_path.parent.mkdir(parents=True, exist_ok=True)
+        new_key = secrets.token_hex(32)
+        key_path.write_text(new_key, encoding="utf-8")
+        os.chmod(key_path, 0o600)
+        logging.getLogger(__name__).info("已自动生成 SECRET_KEY 并持久化到 %s", key_path)
+        return new_key
+    except OSError as e:
+        logging.getLogger(__name__).warning(
+            "SECRET_KEY 持久化失败（%s），使用进程内随机密钥；重启后已保存凭据将失效", e
+        )
+        return secrets.token_hex(32)
+
+
+SECRET_KEY = _load_or_create_secret_key()
 
 AUTHORIZED_USERS = set(os.getenv("AUTHORIZED_USERS", "202540510004").split(","))
 
@@ -73,10 +99,6 @@ RATE_LIMIT_JOBS_WINDOW = int(os.getenv("RATE_LIMIT_JOBS_WINDOW", "60"))
 
 # ========== Server config ==========
 UVICORN_RELOAD = os.getenv("UVICORN_RELOAD", "0").lower() in {"1", "true", "yes", "on"}
-
-# ========== Data path config ==========
-# Docker 环境使用 /app/data，本地开发使用项目目录下的 data
-DATA_DIR = os.getenv("DATA_DIR", "/app/data" if os.path.exists("/app/data") else str(BASE_DIR / "data"))
 
 # ========== User info defaults ==========
 DEFAULT_DEPT_CODE = os.getenv("DEFAULT_DEPT_CODE", "")
@@ -99,20 +121,6 @@ def build_wf_authorize_url(ret_url: str | None = None, state: str | None = None,
         "nonce": nonce or os.urandom(16).hex(),
     }
     return f"{WF_ORIGIN}{WF_SSO_AUTHORIZE_PATH}?{urlencode(params, quote_via=quote)}"
-
-
-def get_config():
-    """Return all config fields."""
-    return {
-        "cas_origin": CAS_ORIGIN,
-        "cas_captcha_url": CAS_CAPTCHA_URL,
-        "cas_login_url": CAS_LOGIN_URL,
-        "wf_origin": WF_ORIGIN,
-        "wf_api_url": WF_API_URL,
-        "wf_home_url": WF_HOME_URL,
-        "oauth_client_id": OAUTH_CLIENT_ID,
-        "badminton_type_id": BADMINTON_TYPE_ID,
-    }
 
 
 def get_frontend_config():

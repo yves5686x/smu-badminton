@@ -388,6 +388,21 @@ def delete_user_account(username: str) -> bool:
         return False
 
 
+def has_saved_account(username: str) -> bool:
+    """该用户是否已在服务端保存登录凭据（登录成功后自动保存）。"""
+    from .core_utils import get_db_pool
+
+    if not username:
+        return False
+    try:
+        with get_db_pool().get_connection() as conn:
+            cur = conn.execute("SELECT 1 FROM user_accounts WHERE username = ?", (username,))
+            return cur.fetchone() is not None
+    except Exception as e:
+        logger.error("查询保存账号失败: %s", e)
+        return False
+
+
 def refresh_token_for_user(username: str, max_attempts: int = 2) -> Optional[Dict[str, str]]:
     """
     刷新用户 token（从数据库获取账号密码并重新登录）。

@@ -51,6 +51,9 @@ python_classes = ["Test*"]
 python_functions = ["test_*"]
 asyncio_mode = "auto"
 addopts = "-v --tb=short"
+markers = [
+    "network: 依赖外部网络（校时接口/CAS），CI 用 -m 'not network' 跳过",
+]
 
 [tool.ruff]
 line-length = 130

@@ -1,6 +1,7 @@
 // Jobs 页面脚本
 
 // ============ 本地存储管理 ============
+// bb_auth 只存 {username}；密码不进 localStorage（服务端托管凭据）
 const Auth = {
     save(auth) {
         try { localStorage.setItem('bb_auth', JSON.stringify(auth)); } catch(e) {}
@@ -32,21 +33,14 @@ async function checkAuthorization(username) {
 }
 
 // ============ 登录对话框 ============
+// 本页只做用户名授权检查（AUTHORIZED_USERS），不收集密码
 const loginDialog = document.getElementById('login-dialog');
 const loginForm = document.getElementById('login-form');
 const loginUsernameEl = document.getElementById('login-username');
-const loginPasswordEl = document.getElementById('login-password');
-const togglePwdBtn = document.getElementById('togglePwd');
 const loginCancelBtn = document.getElementById('login-cancel');
 
 async function promptLogin() {
     return new Promise(resolve => {
-        togglePwdBtn.onclick = () => {
-            const isPwd = loginPasswordEl.type === 'password';
-            loginPasswordEl.type = isPwd ? 'text' : 'password';
-            togglePwdBtn.textContent = isPwd ? '隐藏' : '显示';
-        };
-
         loginCancelBtn.onclick = () => {
             loginDialog.close();
             resolve(false);
@@ -55,9 +49,8 @@ async function promptLogin() {
         loginForm.onsubmit = async (e) => {
             e.preventDefault();
             const u = (loginUsernameEl.value || '').trim();
-            const p = (loginPasswordEl.value || '').trim();
-            if (!u || !p) {
-                Toast.error('登录失败', '请输入学号与密码');
+            if (!u) {
+                Toast.error('登录失败', '请输入学号');
                 return;
             }
 
@@ -68,17 +61,16 @@ async function promptLogin() {
                 return;
             }
 
-            window.__auth = { username: u, password: p };
+            window.__auth = { username: u };
             Auth.save(window.__auth);
             loginDialog.close();
             resolve(true);
         };
 
-        // 预填缓存
+        // 预填缓存（只存用户名）
         const cached = Auth.load();
         if (cached) {
             loginUsernameEl.value = cached.username || '';
-            loginPasswordEl.value = cached.password || '';
         }
 
         loginDialog.showModal();
@@ -418,9 +410,9 @@ document.getElementById('config-save').addEventListener('click', saveConfig);
 async function init() {
     Theme.init();
 
-    // 尝试从缓存加载认证信息
+    // 尝试从缓存加载认证信息（只存用户名，经授权检查后使用）
     const cached = Auth.load();
-    if (cached && cached.username && cached.password) {
+    if (cached && cached.username) {
         // 通过后端 API 验证是否为授权用户
         const isAuthorized = await checkAuthorization(cached.username);
         if (isAuthorized) {

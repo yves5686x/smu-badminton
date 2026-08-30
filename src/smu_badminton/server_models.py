@@ -21,10 +21,10 @@ logger = logging.getLogger(__name__)
 # ============= Pydantic 模型 =============
 
 class BookRequest(BaseModel):
-    login_url: str = Field(..., description="CAS 登录URL")
-    captcha_url: str = Field(..., description="验证码URL")
+    login_url: str = Field("", description="CAS 登录URL（可省略，服务端使用配置默认值）")
+    captcha_url: str = Field("", description="验证码URL（可省略，服务端使用配置默认值）")
     username: str = Field(..., description="学号/用户名")
-    password: str = Field(..., description="密码")
+    password: str = Field("", description="密码（可省略：省略时服务端使用已保存的凭据，登录后自动保存）")
     bookdate: str = Field(..., pattern=r"\d{4}-\d{2}-\d{2}", description="预约日期 YYYY-MM-DD")
     kssj: str = Field(..., pattern=r"^\d{2}:\d{2}$", description="开始时间 HH:MM")
     jssj: str = Field(..., pattern=r"^\d{2}:\d{2}$", description="结束时间 HH:MM")
