@@ -95,19 +95,58 @@ POST /api/book/schedule
     |
     v
 [预取] 一天一约检查 + 资源/时段 ID + user_info，全部复用同一条预热连接池
-    |
-    v
-[验证码预取池] 并发枪数各解一份独立滑块凭证（失败自动快速重试，截止 T-35s）
-    |
-    v
+    |                              |
+    | 预取拿到 ID                   | 预取未拿到 ID（上游 T-0 才放号，常见）
+    v                              v
+[验证码预取池] 已知需要则预热    [验证码预取池] 校验开关未知，投机预热
+    |                              |
+    +--------------+---------------+
+                   v
 [精确等待] 本地钟 + 偏移量走到 T-0（关键窗口不再发出任何非预约请求）
+    |
+    v
+[T-0 兜底] 若预取未拿到资源/时段 ID，现场解析一次（3 次重试、间隔 0.15s）
     |
     v
 [开火] <=2 枪 Barrier 对齐，各带一份凭证单发提交（不重试、4s 快断）
     |
     v
-任一成功 --> 其余停止；汇总后更新任务状态
+任一成功 --> 其余停止
+    |
+    +-- 成功：任务置 done，保留本地预约记录
+    +-- 失败：任务置 failed，并回滚本地预约记录
 ```
+
+### 预取失败不等于任务失败
+
+学校场地是「提前 7 天、每晚 21:00 放号」。因此 T-75s 的预取窗口里目标场次**尚未放出**，
+`fetch_resource_time_id` 必然返回空——这是正常现象，不是故障。若在此处把任务判成 failed，
+就会出现「到点了却一枪未发」的结果。
+
+正确处理：预取失败只记录告警，转入 **T-0 兜底**——发射线程到达目标时刻后现场解析
+一次资源/时段 ID，拿到即立刻提交。多花一个 RTT，但至少开了一枪。
+
+同理，预取失败时 `open_captcha_verify`（资源是否开启滑块校验）也是未知的。
+由于滑块凭证只绑 token、不绑具体场次（`gen_slide_captcha(token)` 没有场次入参），
+此时会**投机预热**验证码池：若随后确认不需要校验，这些凭证被丢弃即可；
+若确实需要，T-0 就直接有凭证可用，避免临阵解滑块（数秒，等于放弃抢票）。
+
+### 失败必须回滚本地预约记录
+
+`local_bookings` 的作用有两个：当天冲突判定的依据、前端格子「已占用」的来源。
+它的唯一约束是 `(bookdate, resources_name, kssj, jssj)`——**按场次唯一**，不带用户名。
+
+因此抢票失败时**必须**删除这条记录（走 `_cleanup_job` 而不是只改任务状态）。否则：
+该用户此后完全无法重试该日期（提示「您当天已有预约记录」），
+且这个场次对所有其他同学都显示为已占用。
+
+回滚遵循「**谁插入谁回滚**」，由 `rollback_local_on_fail` 控制：
+
+| 路由 | 是否插占位记录 | `rollback_local_on_fail` |
+|------|---------------|--------------------------|
+| `/api/book/schedule` | 是 | `True`（默认） |
+| `/api/jobs/scheduled` | 否 | `False` |
+| `/api/jobs/immediate` | 是 | `True` |
 
 ### 分级休眠策略
 
@@ -216,6 +255,19 @@ scheduled --> running --> done
 | `PREFETCH_WINDOW_SEC` | 75 | 距目标时刻多少秒唤醒进入预取窗口 |
 | `CAPTCHA_HARD_STOP_BEFORE_SEC` | 35 | 验证码池构建最晚截止点 |
 | `RUSH_REQUEST_TIMEOUT_SEC` | 4 | 抢票请求超时（单发快断） |
-| `TOKEN_EXP_BUFFER_SEC` | 120 | Token exp 距目标不足该值时提前刷新 |
+| `TOKEN_EXP_BUFFER_SEC` | 120 | 会话 exp 距目标不足该值时提前刷新（经 `session_exp_epoch` 读取，access_token 读不出时回退 id_token） |
+| `T0_RESOLVE_RETRIES` | 3 | T-0 兜底解析资源/时段 ID 的重试次数 |
+| `T0_RESOLVE_GAP_SEC` | 0.15 | T-0 兜底解析的重试间隔（秒） |
 
-复测脚本：`scripts/test_captcha_reuse.py`（滑块验证码一次性/有效期、频控阈值均可实测复核）。
+## 验证脚本
+
+| 脚本 | 用途 |
+|------|------|
+| `scripts/verify_rush_pipeline.py` | 离线回归整条抢票管线（不联网、不碰真实账号）：预取失败兜底、成功判定、验证码投机预热、失败回滚等 8 条路径 |
+| `scripts/test_captcha_reuse.py` | 联网实测滑块验证码一次性/有效期与频控阈值 |
+| `scripts/verify_real_login.py` | 真机验证登录链路与 `Origin` 派生（只登录、不提交预约） |
+| `scripts/diag_login_chain.py` | 逐跳诊断登录重定向链与代理环境变量 |
+
+```bash
+python scripts/verify_rush_pipeline.py   # 全部 PASS 即管线正常
+```

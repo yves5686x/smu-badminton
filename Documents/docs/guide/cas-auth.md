@@ -48,14 +48,30 @@ Token 缓存（默认 TTL 900 秒）
 2. 前端展示验证码，用户手动输入
 3. 调用 `/api/login` 时传入 `captcha_code` 参数
 
+## Token 形态（2026-09-18 真机实测）
+
+两个 token 的形态完全不同，写任何涉及 token 的代码前先看这张表：
+
+| Token | 长度 | 形态 | 能否读出 `exp` |
+|-------|------|------|----------------|
+| `access_token` | 32 字符 | **opaque token**（无 `.` 分隔，不含 payload） | ❌ 读不出 |
+| `id_token` | 1168 字符 | 标准 JWT | ✅ 可读，寿命 **7200s（2 小时）** |
+
+由此产生三条硬约束：
+
+1. **任何"从 `access_token` 解析 JWT claim"的写法都拿不到东西**。需要用户信息时走
+   `id_token`——`profile_from_claims` 已按 `id_token` 优先实现。
+2. **判断会话剩余寿命必须用 `token_profile.session_exp_epoch(tokens)`**：先读
+   `access_token`，读不出回退 `id_token`。抢票的 T-0 预检（`TOKEN_EXP_BUFFER_SEC`）走的就是它。
+   早期实现只读 `access_token`，`exp_epoch is None` 会让整个判断被**静默跳过**，
+   那段注释写着"杜绝 T-0 触发重新登录"的逻辑实际上从未生效。
+3. 换算：会话寿命 7200s，而 Token 缓存 TTL 默认 900s，因此 T-0 时手上的 token 至少还剩
+   ~6300s，远大于 120s 的预检缓冲——正常路径下预检不会触发刷新。
+
 ## Token 缓存机制
 
-登录成功后获取的 Token 会被缓存，避免重复登录：
-
-| 配置项 | 默认值 | 说明 |
-|--------|--------|------|
-| `TOKEN_CACHE_TTL_SEC` | 900 | Token 缓存有效期（秒） |
-| `TOKEN_PROFILE_TTL_SEC` | 3600 | 用户 Profile 缓存有效期（秒） |
+登录成功后获取的 Token 会被缓存，避免重复登录。缓存有效期由 `TOKEN_CACHE_TTL_SEC` 与
+`TOKEN_PROFILE_TTL_SEC` 控制，默认值见[配置参数](./config.md)。
 
 - Token 缓存按用户名存储，线程安全
 - 缓存命中时直接返回，无需重新登录
@@ -102,3 +118,48 @@ Token 缓存（默认 TTL 900 秒）
 - `response_type`：`id_token token`
 - `scope`：`data openid process task app submit process_edit start profile`
 - `state` / `nonce`：随机生成的安全参数
+
+## 登录链路验证（真机）
+
+`Origin` 头与验证码 URL 都按**解析出的登录页 host** 派生，学校侧是否接受只能靠真机验证。
+项目提供两个脚本：
+
+| 脚本 | 用途 |
+|------|------|
+| `scripts/verify_real_login.py` | 走**应用真实路径**（`get_token_cached` → `login_with_retry`）登录一次，打印实际 wire 出去的 `Origin` / `Referer`，以及两个 token 的形态与剩余寿命 |
+| `scripts/diag_login_chain.py` | 链路第一跳就失败时的诊断工具：逐跳打印 host / status / `Location`，并打印 `requests.getproxies()`；失败后自动用 `trust_env=False` 复跑对比 |
+
+```bash
+# 1) 只解析重定向链、不提交凭据（推荐的第一次运行）
+python scripts/verify_real_login.py --dry-run
+
+# 2) 真机登录：学号自动取 AUTHORIZED_USERS 首个，只敲密码（不回显）
+python scripts/verify_real_login.py
+
+# 3) 第一跳就报错时诊断
+python scripts/diag_login_chain.py
+```
+
+判定标准：`Origin` 应与解析出的登录页 host 同源（当前为 `https://sso.shmtu.edu.cn`）。
+脚本**只登录、不提交任何预约**，因此不消耗上游的预约提交频控额度。
+
+### 代理变量陷阱
+
+`requests.Session` 默认 `trust_env=True`，会读取 `http_proxy` / `all_proxy` 等环境变量。
+若某个代理变量的值是占位符（如 `...`），urllib3 在**连接阶段**会把它当成 host，报出：
+
+```
+LocationParseError: Failed to parse: '...', label empty or too long
+```
+
+这条消息由 `Failed to parse: '<host>', label empty or too long` 拼成，**引号里的 `...` 是
+host 字面值**，不是被截断的长 URL——很容易被误判成"学校侧登录链路改版"。区分方法：
+
+| 现象 | 含义 |
+|------|------|
+| `LocationParseError: ... '...', label empty or too long` | 连接阶段 host 异常 → **代理变量**问题 |
+| `InvalidURL: URL has an invalid label.` | 请求 URL 本身畸形 → 入口 URL 配置问题 |
+
+处理：先跑 `python scripts/diag_login_chain.py` 看 `getproxies()` 输出；确认是占位符后
+`unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY`（仅当前终端），
+或保留代理但让学校域名直连：`export no_proxy="shmtu.edu.cn,localhost,127.0.0.1"`。

@@ -30,15 +30,55 @@ python -m pytest tests/unit/ -v                     # unit only
 python -m pytest tests/integration/ -v              # integration only
 python -m pytest tests/unit/test_obfuscate.py -v    # single file
 python -m pytest tests/unit/test_obfuscate.py::test_roundtrip -v  # single test
+
+# Offline regression for the whole rush pipeline (no network, no real account)
+python scripts/verify_rush_pipeline.py               # all PASS = pipeline healthy
+
+# Live measurement of upstream captcha/rate-limit behaviour (needs a real token)
+python scripts/test_captcha_reuse.py --help
+
+# Real-device login check: prints the actual Origin/Referer on the wire + both token shapes
+python scripts/verify_real_login.py --dry-run        # chain + Origin only, no credentials
+python scripts/verify_real_login.py                  # real login (logs in only, never books)
+
+# Diagnose a login chain that fails on the first hop (prints per-hop host + getproxies())
+python scripts/diag_login_chain.py
 ```
 
 ## Environment Setup
 
-Copy `.env.example` to `.env` and configure:
-- `CAS_ORIGIN`, `WF_ORIGIN`, `WF_API_URL` - University platform URLs
-- `OAUTH_CLIENT_ID` - OAuth client identifier
-- `BADMINTON_TYPE_ID` - Resource type ID for badminton courts
-- `SERVER_PORT` - (optional) Override dev server port, defaults to 5002
+Config has a strict layer model — **one authoritative source per key**
+(full spec: `Documents/docs/guide/config.md`, generated table checked by tests):
+
+- **L1** process env (`docker-compose environment:` / `docker run -e`) — wins over L2
+- **L2** project-root `.env` — deployer-maintained; **only keys that deviate from defaults**
+- **L3** runtime-mutable config (DB `app_settings` table, `settings_store.py`) — UI-editable,
+  currently just the login entry URL
+- **L4** code defaults (`config.py` `_DEFAULT_SPEC`) — the single default source;
+  `.env.example` mirrors it key-for-key
+
+`cp .env.example .env`, then keep only the lines you actually want to change.
+`AUTHORIZED_USERS` defaults to empty and **must be set explicitly** or the job-monitor
+page and config-update endpoint stay closed to everyone.
+
+Derived values are never configured separately: the CAS login-page host is resolved along
+the redirect chain, and both the captcha URL and the login POST `Origin` header derive from
+it (`CAS_ORIGIN` and `CAS_LOGIN_URL` were removed).
+
+## Environment Traps
+
+Two local-environment gotchas that look like code/upstream bugs but are neither:
+
+- **Proxy env vars break the login chain.** `requests.Session` defaults to `trust_env=True`, so it
+  reads `http_proxy` / `all_proxy` / etc. If such a variable holds a placeholder (`...`), urllib3
+  uses it as the connect host and raises
+  `LocationParseError: Failed to parse: '...', label empty or too long`. The `'...'` there is the
+  **host literal**, not a truncated URL — do not misread it as upstream breakage. Diagnose with
+  `python scripts/diag_login_chain.py` (dumps `getproxies()` and per-hop host).
+  Contrast: a genuinely malformed entry URL raises `InvalidURL: URL has an invalid label.`
+- **`ruff` is not in `.venv/bin`**, and `uv run ruff` fails here with an editable-build error
+  (setuptools `project.license` deprecation + uv build-cache `EEXIST`) unrelated to code quality.
+  Use `uvx ruff`, or check small edits with `python -m py_compile` plus actually running the script.
 
 ## Architecture
 
@@ -64,7 +104,7 @@ Copy `.env.example` to `.env` and configure:
 | `cas_manager.py` | `BookingManager` singleton: job create/track/stop, DB persistence, scheduled/immediate booking orchestration, `get_token_cached`（凭据回退咽喉点） |
 | `cas_ocr.py` | Arithmetic captcha OCR via ddddocr whole-image recognition (replaced deprecated NCNN ResNet pipeline after site font change) |
 | `slide_captcha.py` | 滑块验证码缺口识别（alpha 边缘模板匹配 + 多方法兜底投票） |
-| `token_profile.py` | Token/profile caches (JWT claim parsing), saved user accounts, silent re-login |
+| `token_profile.py` | Token/profile caches (JWT claim parsing), saved user accounts, silent re-login; `session_exp_epoch()`（会话 exp：access_token → id_token 回退） |
 | `core_utils.py` | Thread-safe SQLite `DatabasePool`, custom exceptions (`BookingError`, `DatabaseError`), error handling decorators (`handle_errors`, `db_operation`), password obfuscation |
 | `config.py` | Environment configuration from `.env`; SECRET_KEY 自动生成并持久化 |
 
@@ -117,11 +157,40 @@ Target time = `bookdate - 7 days + target_time_str`. E.g., booking for 2025-12-1
 | Captcha validation order | Server validates captcha BEFORE business rules; unverified captcha → 「系统异常」, valid captcha → business errors | Calibrated negative control possible; classifier keywords stable |
 | Solver reliability | ~70% per attempt (fails with checkCaptcha 4001), retry succeeds | Retry redundancy belongs in prefetch window (cheap time), not at T-0 |
 | Save rate limit | Per-account: ~2 rapid saves OK, 3rd immediately banned for exactly 3 minutes | `MAX_UPSTREAM_BURST = 2` hard cap on concurrent shots |
+| Token shape (2026-09-18) | `access_token` is a 32-char **opaque** token (no JWT payload); `id_token` is a 1168-char JWT carrying `exp`, session lifetime **7200s** | Never parse JWT claims off `access_token`. Session expiry goes through `session_exp_epoch(tokens)` — reads `access_token` first, falls back to `id_token` |
 | Official cancel API | `checkAppointmentCancelTime(id)` + `updateAppointmentInformationState(id, state="1")` works | Available for implementing real cancellation later |
 
 ### Rush Scheduling Pipeline (start_scheduled_booking)
 
-T-75s wake → `ClockSync.sync()` measures network-vs-local offset → login (JWT exp pre-checked against target time, refreshed early if needed) → dedupe check + resource/time prefetch + user_info resolution all through one warmed `_shared_session()` → build captcha pool (`min(num_threads, 2)` credentials, retry until T-35s) → workers wait via local clock + offset (zero HTTP near T-0) → barrier → each shot fires single-shot (`allow_retry=False`, 4s timeout) with its own credential → first success stops the rest. Ban responses are detected and logged with the 3-minute unban implication.
+T-75s wake → `ClockSync.sync()` measures network-vs-local offset → login (session expiry pre-checked against target time via `session_exp_epoch()`, refreshed early if needed — it reads `id_token`'s `exp` because `access_token` is opaque) → dedupe check + resource/time prefetch + user_info resolution all through one warmed `_shared_session()` → build captcha pool (`min(num_threads, 2)` credentials, retry until T-35s) → workers wait via local clock + offset (zero HTTP near T-0) → barrier → each shot fires single-shot (`allow_retry=False`, 4s timeout) with its own credential → first success stops the rest. Ban responses are detected and logged with the 3-minute unban implication.
+
+Two details matter because slots are released at 21:00 for a date 7 days out:
+
+- **Prefetch failure is normal, not fatal.** At T-75s the target slot does not exist yet, so
+  `fetch_resource_time_id` returns nothing. The job must NOT be marked failed there — it falls
+  through to a **T-0 fallback** where the firing threads resolve the resource/time ID once
+  (3 retries, 0.15s apart) and submit immediately. Prefetch failure also leaves
+  `open_captcha_verify` unknown, so the captcha pool is built **speculatively**; creds are only
+  attached to the mutation when validation is confirmed to be on. Captcha credentials are
+  token-scoped, not slot-scoped (`gen_slide_captcha(token)` takes no slot id), which is what makes
+  speculation valid.
+- **Failure must roll back the local placeholder.** `local_bookings` has
+  `UNIQUE(bookdate, resources_name, kssj, jssj)` — keyed by *slot*, not by user. A leftover row from
+  a failed rush blocks that user from ever retrying the date (「您当天已有预约记录」) and shows the
+  slot as taken to everyone else. Rollback follows "whoever inserted rolls back", controlled by
+  `rollback_local_on_fail` (True for `/api/book/schedule` and `/api/jobs/immediate`, False for
+  `/api/jobs/scheduled`).
+
+### Booking result classification
+
+The booking mutation's business fields live one level down, at
+`data.<mutationName>.{code, messages}`. Always go through `unwrap_graphql_result()` /
+`is_business_success()` / `business_messages()` in `booking_api.py` — reading `code` off the top
+level silently reports every real success as a failure. `unwrap_graphql_result()` is idempotent
+(returns an already-unwrapped body as-is), so it is safe to chain the helpers.
+
+Offline regression for all of the above: `python scripts/verify_rush_pipeline.py` (8 paths,
+no network, no real account, temp data dir).
 
 ### OCR Models (deprecated)
 

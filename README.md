@@ -36,13 +36,13 @@ src/smu_badminton/      FastAPI 服务与核心业务逻辑
   cas_ocr.py            ddddocr 算术验证码识别
   cas_manager.py        BookingManager：任务编排与持久化
   booking_api.py        资源/时段/预约的 GraphQL 调用
-  token_profile.py      token 与用户账号凭据缓存
+  token_profile.py      token 与用户账号凭据缓存（含会话 exp 解析）
   core_utils.py         线程安全 SQLite 连接池、异常、密码混淆
   config.py             .env 配置加载
 templates/              Web 页面模板（index.html / jobs.html）
 static/                 前端静态资源
 tests/                  单元测试与集成测试
-scripts/                上游行为实测脚本（验证码复用性/频控阈值）
+scripts/                上游行为实测与链路验证脚本（验证码复用性/频控阈值/真机登录）
 Documents/docs/         VitePress 文档
 .env.example            示例环境变量
 docker-compose.yml      Docker Compose 启动配置
@@ -87,30 +87,27 @@ pip install -e ".[dev]"
 cp .env.example .env
 ```
 
-最少建议确认这些配置：
+`.env` 只需保留**要偏离默认值**的项——与默认值相同的键写了就是第二份副本，会随代码漂移。
+`.env.example` 列出了全部键及其代码默认值。
+
+最少建议确认这两项：
 
 ```env
-CAS_ORIGIN=https://sso.shmtu.edu.cn
-CAS_CAPTCHA_URL=https://sso.shmtu.edu.cn/cas/captcha
-WF_ORIGIN=https://wf.shmtu.edu.cn
-WF_API_URL=https://wf.shmtu.edu.cn/bus/graphql/apps_yy_sys
-OAUTH_CLIENT_ID=kwxKbMKq3Nafw2mApFZz
-BADMINTON_TYPE_ID=93c2a115-5c73-4e30-bb6a-dfcc5404e46f
-```
+# 授权用户（可访问任务监控页、更新运行时配置）。默认为空集合，必须显式配置
+AUTHORIZED_USERS=你的学号
 
-生产或多人使用时，额外建议设置：
-
-```env
-AUTHORIZED_USERS=202540510004
+# 可信代理 IP（配置后才信任 X-Forwarded-For 头）
 TRUSTED_PROXIES=127.0.0.1
 ```
 
 > `SECRET_KEY` 无需手动设置：未配置时首次启动自动生成随机密钥并持久化到
 > `DATA_DIR/secret_key`，重启复用；仅在多实例共享数据库等场景才需要显式指定。
 
-> CAS 登录页已由 `cas.shmtu.edu.cn` 迁至 `sso.shmtu.edu.cn`，验证码接口 `/cas/captcha`
-> 也随之迁移并改为返回 JSON `{image, token, expiresAt}`。代码会自动按登录页 host
-> 推导同源验证码 URL，因此 `.env` 中旧 `cas.` 地址残留也不会跨 host 抓取失败。
+> 登录入口 URL 不在 `.env` 里：它是运行时可变配置，存在数据库 `app_settings` 表，
+> 可在任务监控页界面上修改、保存即生效。默认值为 WF 首页。
+>
+> CAS 登录页已由 `cas.shmtu.edu.cn` 迁至 `sso.shmtu.edu.cn`。登录页 host 由代码沿重定向链
+> 解析，验证码 URL 与登录 POST 的 `Origin` 头都按其同源派生，无需手工配置这两个值。
 
 ### 4. 启动服务
 
@@ -151,9 +148,11 @@ docker-compose up --build
 
 `docker-compose.yml` 中做了这些事情：
 
-- 挂载 `./.env` 到容器内 `/app/.env`
+- 只读挂载 `./.env` 到容器内 `/app/.env`（运行时可变配置走数据库，不改这个文件）
 - 使用 Docker volume 持久化 `/app/data`
-- 对 `/health` 做健康检查
+- 对 `/health` 做健康检查（定义在 `Dockerfile`，端口跟随 `SERVER_PORT`）
+
+端口只有一个旋钮：改 `SERVER_PORT` 会同时作用于监听端口、端口映射与健康检查。
 
 ### 手动构建
 
@@ -169,25 +168,23 @@ docker run -d \
   smu-badminton
 ```
 
-## 常用环境变量
+## 配置
 
-除了 `.env.example` 里的基础配置，运行时还常用这些变量：
+所有配置项、默认值与分层规则见 **[Documents/docs/guide/config.md](Documents/docs/guide/config.md)**。
+这里只讲放哪儿：
 
-| 变量 | 默认值 | 说明 |
+| 想改什么 | 放哪里 | 生效时机 |
 | --- | --- | --- |
-| `SERVER_PORT` | 本地 `5002` / Docker `5000` | 服务监听端口 |
-| `BOOKING_DEBUG` | `0` | 设为 `1` 输出详细预约日志 |
-| `UVICORN_RELOAD` | `0` | 设为 `1` 开启自动重载 |
-| `TOKEN_CACHE_TTL_SEC` | `900` | Token 缓存时间 |
-| `TOKEN_PROFILE_TTL_SEC` | `3600` | 用户 Profile 缓存时间 |
-| `JOB_RETENTION_SEC` | `3600` | 历史任务保留时间 |
-| `DATA_DIR` | 自动判断 | SQLite 数据目录 |
-| `RATE_LIMIT_MAX` | `30` | 默认接口限流数 |
-| `RATE_LIMIT_WINDOW` | `10` | 默认限流窗口秒数 |
-| `RATE_LIMIT_JOBS_MAX` | `300` | 任务接口限流数 |
-| `RATE_LIMIT_JOBS_WINDOW` | `60` | 任务接口限流窗口秒数 |
+| 每台机器不同的部署参数（端口、数据目录、时区、可信代理） | 进程环境变量（compose 的 `environment:` 或 `docker run -e`） | 启动时 |
+| 学校侧地址、限流阈值、缓存 TTL | 项目根 `.env` | 启动时 |
+| 登录入口 URL | 任务监控页界面（存数据库 `app_settings`） | 立即生效 |
 
-完整配置说明见 [Documents/docs/guide/config.md](Documents/docs/guide/config.md)。
+本地开发常用：
+
+```bash
+BOOKING_DEBUG=1 python -m smu_badminton.server_fastapi   # 输出详细预约日志
+SERVER_PORT=8080 python -m smu_badminton.server_fastapi  # 换端口
+```
 
 ## API 概览
 
@@ -234,6 +231,23 @@ python -m pytest tests/unit/ -v
 python -m pytest tests/integration/ -v
 ```
 
+### 验证脚本
+
+上述测试均不触网。需要验证真实登录或上游行为时用这些脚本：
+
+```bash
+python scripts/verify_real_login.py --dry-run   # 登录链路 + Origin，不提交凭据
+python scripts/verify_real_login.py             # 真机登录（只登录，不提交预约）
+python scripts/diag_login_chain.py              # 登录链路逐跳诊断（含代理环境变量）
+python scripts/test_captcha_reuse.py --help     # 上游验证码复用性 / 频控实测
+```
+
+不联网的抢票管线回归（8 条路径，不需要真实账号）：
+
+```bash
+python scripts/verify_rush_pipeline.py          # 全部 PASS 即管线正常
+```
+
 ## 文档站
 
 项目文档基于 VitePress，源码位于 `Documents/docs/`。
@@ -274,6 +288,10 @@ npm run docs:build
   因此并发开火数硬上限为 2（实测方法见 `scripts/test_captcha_reuse.py`）。
 - 滑块验证码为一次性凭证（复用会被拒绝），抢票流水线在预取窗口为每枪各解一份。
 - 「取消」会尽力同步撤销学校侧预约；该账号从未在本系统登录过时仅能清除本地排队。
+- **代理环境变量会打挂登录**：`requests` 默认信任 `http_proxy` / `all_proxy` 等变量，若其值是
+  占位符（如 `...`），登录会报 `LocationParseError: Failed to parse: '...'`。报错里的 `'...'`
+  是**主机名字面值**，不是学校侧故障。先用 `python scripts/diag_login_chain.py` 排查，或
+  `unset http_proxy https_proxy all_proxy` 后重试。
 
 ## License
 

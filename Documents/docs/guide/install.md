@@ -57,32 +57,17 @@ docker-compose up --build
 
 ### docker-compose 配置说明
 
-```yaml
-services:
-  smu-badminton:
-    build: .
-    container_name: smu-badminton
-    restart: unless-stopped
-    ports:
-      - "5000:5000"
-    volumes:
-      # 数据库持久化（Docker volume）
-      - smu-badminton-data:/app/data
-      # 环境变量配置
-      - ./.env:/app/.env:ro
-    environment:
-      - TZ=Asia/Shanghai
-      - PYTHONUNBUFFERED=1
-      - SERVER_PORT=5000
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health', timeout=5)"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 15s
+编排文件就是仓库根目录的 [`docker-compose.yml`](../../../docker-compose.yml)，不再在文档里抄一份
+（抄一份就会随实际文件漂移）。它做了三件事：
 
-volumes:
-  smu-badminton-data:
+- 只读挂载 `./.env` 到容器内 `/app/.env`（运行时可变配置走数据库，不改这个文件）
+- 用 Docker volume `smu-badminton-data` 持久化 `/app/data`
+- 端口、数据目录通过 `environment:` 显式传入（L1）
+
+端口只有一个旋钮：`SERVER_PORT` 同时作用于监听端口、端口映射与健康检查，默认 `5000`。
+
+```bash
+SERVER_PORT=8080 docker-compose up -d    # 换成 8080
 ```
 
 ### 手动 Docker 构建
@@ -117,10 +102,14 @@ Dockerfile 基于 `python:3.11-slim`，安装了以下系统级依赖：
 
 ## 端口说明
 
-| 环境 | 端口 | 配置方式 |
-|------|------|----------|
-| 本地开发 | 5002 | 默认值，可通过 `SERVER_PORT` 环境变量覆盖 |
-| Docker/生产 | 5000 | docker-compose 中 `SERVER_PORT=5000` |
+由 `SERVER_PORT` 决定，默认值：
+
+| 环境 | 端口 | 来源 |
+|------|------|------|
+| 本地开发 | 5002 | 代码默认值（L4） |
+| Docker/生产 | 5000 | `docker-compose.yml` 的 `environment:`（L1） |
+
+端口同时作用于监听端口、端口映射与健康检查，改一处就够。详见[配置参数](./config.md)。
 
 ## 数据存储
 
@@ -151,3 +140,24 @@ python -m pytest tests/unit/test_obfuscate.py -v
 # 运行单个测试用例
 python -m pytest tests/unit/test_obfuscate.py::test_roundtrip -v
 ```
+
+## 验证登录链路
+
+部署完成后，建议先用真机脚本确认登录链路可用——脚本**只登录、不提交任何预约**，
+不消耗上游的预约提交频控额度：
+
+```bash
+# 1) 只解析重定向链与 Origin，不提交凭据
+python scripts/verify_real_login.py --dry-run
+
+# 2) 真机登录（学号自动取 AUTHORIZED_USERS 首个，密码交互输入不回显）
+python scripts/verify_real_login.py
+```
+
+预期输出：解析到的登录页为 `https://sso.shmtu.edu.cn/cas/login?...`，登录 POST 的 `Origin`
+与登录页 host 同源，最后打印 `✓ 登录成功` 及 token 剩余寿命。
+
+若第一跳就报 `LocationParseError: Failed to parse: '...', label empty or too long`，说明运行
+环境里有**值异常的代理变量**（`requests` 默认信任 `http_proxy` / `all_proxy`）——报错里的
+`'...'` 是主机名字面值，不是学校侧故障。跑 `python scripts/diag_login_chain.py` 定位，
+详见 [CAS 认证](./cas-auth.md)。

@@ -37,37 +37,33 @@ pip install -e ".[dev]"
 
 ### 3. 配置环境变量
 
-复制 `.env.example` 为 `.env` 并填写必要配置：
+复制 `.env.example` 为 `.env`：
 
 ```bash
 cp .env.example .env
 ```
 
-最小配置需要修改以下项：
+学校侧地址（WF 平台、OAuth 客户端 ID、场地资源类型 ID、CAS 验证码地址）都已有正确的
+代码默认值，**不需要抄进 `.env`**——写进去就是第二份副本，将来改代码它不会跟着变。
+
+`.env` 里只需要填**要偏离默认值**的项，通常就一项：
 
 ```env
-# CAS 登录地址（已迁移至 sso.shmtu.edu.cn，通常无需修改，使用默认值即可）
-CAS_ORIGIN=https://sso.shmtu.edu.cn
-CAS_CAPTCHA_URL=https://sso.shmtu.edu.cn/cas/captcha
-
-# 微服务平台地址（通常无需修改）
-WF_ORIGIN=https://wf.shmtu.edu.cn
-WF_API_URL=https://wf.shmtu.edu.cn/bus/graphql/apps_yy_sys
-
-# OAuth 客户端 ID（通常无需修改）
-OAUTH_CLIENT_ID=kwxKbMKq3Nafw2mApFZz
-
-# 羽毛球场地资源类型 ID（通常无需修改）
-BADMINTON_TYPE_ID=93c2a115-5c73-4e30-bb6a-dfcc5404e46f
+# 授权用户（可访问任务监控页、更新运行时配置）。默认为空集合，必须显式配置
+AUTHORIZED_USERS=你的学号
 ```
 
-生产环境额外建议：
+部署在反向代理后面时再加：
 
 ```env
-SECRET_KEY=your-random-secret-key
-AUTHORIZED_USERS=202540510004
+# 可信代理 IP（配置后才信任 X-Forwarded-For 头）
 TRUSTED_PROXIES=127.0.0.1
 ```
+
+> `SECRET_KEY` 无需手动设置：未配置时首次启动自动生成随机密钥并持久化到
+> `DATA_DIR/secret_key`，重启复用。仅在多实例共享数据库等场景才需要显式指定。
+>
+> 完整键清单、默认值与分层规则见[配置参数](./config.md)。
 
 ### 4. 启动服务
 

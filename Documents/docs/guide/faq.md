@@ -12,13 +12,16 @@ A: 验证码识别使用 ddddocr 本地整图推理，内置 onnx 模型在首�
 因此第一次登录会稍慢，属正常现象。无需预先下载或挂载任何模型文件，也不存在 `OCR_MODE` /
 远程 OCR 之类的配置项（早期 NCNN 三模型管线已移除）。
 
-### Q: 使用默认 SECRET_KEY 的警告可以忽略吗
+### Q: 需要手动设置 SECRET_KEY 吗
 
-A: 不建议忽略。默认 `SECRET_KEY` 是公开的，使用它存储的密码可被轻易解码。生产环境务必在 `.env` 中设置自定义密钥：
+A: 不需要。源码里不存在公开的默认密钥——未配置时首次启动会生成随机密钥并持久化到
+`DATA_DIR/secret_key`，重启复用。仅在多实例共享同一数据库等场景才需要显式指定同一个值：
 
 ```env
 SECRET_KEY=your-random-secret-key-here
 ```
+
+换用新密钥后旧混淆数据按失效处理（`deobfuscate` 返回空），用户重新登录即可重建保存的凭据。
 
 ## 登录与认证
 
@@ -28,11 +31,57 @@ A: 验证码识别准确率受图片质量与字体影响。可以尝试：
 
 1. 系统已对识别失败做重试（`login_with_retry` 内部最多 `max_retries × 3` 次），偶发失败一般会自愈
 2. 仍失败时前端切换为手动输入验证码模式（`/api/captcha` 取图，`/api/login` 传 `captcha_code`）
-3. 确认 `CAS_CAPTCHA_URL` 指向 `sso.shmtu.edu.cn/cas/captcha`（已迁移，旧 `cas.` 地址由代码同源推导纠正）
+3. 一般不需要检查验证码地址：登录页 host 由代码沿重定向链解析，验证码 URL 与登录 POST 的
+   `Origin` 头都按其同源派生，`.env` 里残留旧的 `cas.` 地址也会被自动纠正
 
 ### Q: Token 缓存多久过期
 
-A: 默认 900 秒（15 分钟），可通过 `TOKEN_CACHE_TTL_SEC` 环境变量调整。过期后系统会自动重新登录获取新 Token。
+A: 由 `TOKEN_CACHE_TTL_SEC` 控制（默认值见[配置参数](./config.md)）。过期后系统会自动重新登录获取新 Token。
+服务端 Token 缓存按用户名存储，调用 `/api/logout` 可手动清除。
+
+> 实测补充（2026-09-18）：`access_token` 是 32 字符的 opaque token，**读不出 `exp`**；
+> `id_token` 才是 1168 字符的 JWT（寿命 7200s）。会话剩余寿命统一用
+> `session_exp_epoch(tokens)` 读取——先读 access_token，读不出回退 id_token。
+> 详见 [CAS 认证](./cas-auth.md)。
+
+### Q: 报 `LocationParseError: Failed to parse: '...', label empty or too long` 是怎么回事
+
+A: 这是**终端里的代理环境变量**造成的，与学校侧无关。
+
+这条消息由 `Failed to parse: '<host>', label empty or too long` 拼成，**引号里的 `...` 就是
+host 字面值**——不是被截断的长 URL。请求 URL 的 host 明明是 `wf.shmtu.edu.cn`，连接阶段却
+要连主机名 `...`，只可能是 `requests` 走了代理，而代理变量的值是个没填的占位符。
+（`requests.Session` 默认 `trust_env=True`，会读取 `http_proxy` / `all_proxy` 等变量。）
+
+```bash
+# 确认
+env | grep -i proxy
+
+# 方案一：当前终端整个不用代理
+unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY
+
+# 方案二：代理要留着上外网，只让学校域名直连
+export no_proxy="shmtu.edu.cn,localhost,127.0.0.1"
+```
+
+随后跑 `python scripts/diag_login_chain.py`——它会直接打印 `requests.getproxies()` 并逐跳给出
+host，可确认问题已消除。注意 `unset` 只对当前终端会话有效。
+
+对照：如果换成 `InvalidURL: URL has an invalid label.`，那才是**入口 URL 本身畸形**（配置问题），
+两者不要混为一谈。
+
+### Q: 怎么确认登录链路（Origin 头改动）没被改坏
+
+A: 用 `scripts/verify_real_login.py`。它走应用真实路径登录一次，并钩住 `requests.Session.post`
+打印**实际 wire 出去的 `Origin` / `Referer`**，同时剖析两个 token 的形态与剩余寿命：
+
+```bash
+python scripts/verify_real_login.py --dry-run   # 只解析链路与 Origin，不提交凭据
+python scripts/verify_real_login.py             # 真机登录（只登录，不提交预约）
+```
+
+判定标准：`Origin` 应与解析出的登录页 host 同源（当前是 `https://sso.shmtu.edu.cn`）。
+脚本只登录、不提交预约，不消耗上游的预约提交频控额度。
 
 ### Q: 登录失败 error_type 含义
 
@@ -86,14 +135,13 @@ A: 首次查询（缓存 MISS）需要请求多个 GraphQL 接口获取完整数
 
 ### Q: 请求返回 429 状态码
 
-A: 表示请求频率超过限流阈值。默认限制：
+A: 表示请求频率超过限流阈值。限流阈值由 `RATE_LIMIT_*` 环境变量控制，**各部署取值可能不同**
+（默认值见[配置参数](./config.md)），所以这里不列具体数字。被限流时响应体里直接带着本次
+生效的阈值，照着调即可：
 
-| 接口 | 限制 |
-|------|------|
-| 预约/可用性接口 | 10 秒内最多 30 次 |
-| 任务接口 | 60 秒内最多 300 次 |
-
-降低请求频率或调整 `RATE_LIMIT_MAX` / `RATE_LIMIT_JOBS_MAX` 环境变量。
+```json
+{"ok": false, "error": "请求过于频繁", "limit": 60, "window_sec": 60, "path": "/api/jobs"}
+```
 
 ### Q: 如何配置可信代理
 
@@ -130,8 +178,22 @@ A: 上游对预约提交接口按账号限流：约 2 次连发内安全，第 3
 
 A: 实测定案：**一次性消费**——同一凭证第二次提交会返回「验证码不能重复使用」。凭证本体
 从签发起至少 3 分钟内有效，但第一次提交即被烧掉，所以每次预约都需要独立解一份。系统在定时
-抢票的预取窗口（T-45s 起）就为每一枪提前解好带重试的凭证。复核脚本：
-`scripts/test_captcha_reuse.py`。
+抢票的预取窗口（T-75s 唤醒、截止 T-35s）就为每一枪提前解好带重试的凭证；若预取阶段
+还不知道该资源是否需要校验（上游 T-0 才放号时会这样），会**投机预热**一份池子备用。
+复核脚本：`scripts/test_captcha_reuse.py`。
+
+### Q: 到点了却提示预约失败，之后还一直说「当天已有预约记录」，怎么办
+
+A: 这对应两个已修复的历史缺陷：
+
+1. **预约结果判定读错了层级**。上游把业务字段放在 GraphQL 响应的 `data.<mutation>` 第二层，
+   旧实现直接对顶层取 `code`，于是**真实抢到的预约也被判成失败**。
+2. **失败后没有回滚本地预约占位记录**。`local_bookings` 的唯一约束是按**场次**的
+   （`bookdate + 场地 + 时段`），留一条就同时挡住本人重试和所有其他同学选这个场次，
+   于是会一直提示「您当天已有预约记录，每人每天只能预约一次」。
+
+如果本地库里已经躺了失败任务的残留记录，可以先确认学校侧是否真有预约；确认没有的话，
+删除 `data/data.db` 中对应的 `local_bookings` 行即可恢复可预约状态。
 
 ### Q: 点了「立即预订」，为什么结果过几秒才显示
 

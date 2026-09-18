@@ -655,7 +655,8 @@ SMU Badminton 提供 RESTful API，所有接口返回 JSON 格式数据。基础
 
 ### GET /api/config
 
-获取前端所需的配置信息。
+获取前端所需的配置信息。这两个字段都来自登录入口 URL 的权威值（L3 数据库 → L4 代码默认），
+读与写指向同一个值。
 
 **响应：**
 
@@ -664,7 +665,6 @@ SMU Badminton 提供 RESTful API，所有接口返回 JSON 格式数据。基础
   "ok": true,
   "data": {
     "login_url": "https://wf.shmtu.edu.cn/yy-sys/pc/home",
-    "authorize_url": "https://wf.shmtu.edu.cn/sso/oauth2/authorize?...",
     "captcha_url": "https://sso.shmtu.edu.cn/cas/captcha"
   }
 }
@@ -674,14 +674,17 @@ SMU Badminton 提供 RESTful API，所有接口返回 JSON 格式数据。基础
 
 ### POST /api/config/update
 
-更新 CAS 登录 URL 配置。需要权限验证：用户必须在 `AUTHORIZED_USERS` 列表中。
+更新**登录入口 URL**（运行时可变配置）。需要权限验证：用户必须在 `AUTHORIZED_USERS` 列表中。
+
+该值存于数据库 `app_settings` 表，保存即生效，无需重启；`login_url` 传空串表示清除覆盖、
+恢复默认值（WF 首页）。
 
 **请求体：**
 
 ```json
 {
-  "login_url": "https://sso.shmtu.edu.cn/cas/login?service=...",   // 必填，新的 CAS 登录 URL
-  "current_username": "202540510004"                                 // 必填，当前操作用户名
+  "login_url": "https://wf.shmtu.edu.cn/yy-sys/pc/home",   // 必填，新的登录入口 URL；空串恢复默认
+  "current_username": "202540510004"                        // 必填，当前操作用户名
 }
 ```
 
@@ -691,12 +694,20 @@ SMU Badminton 提供 RESTful API，所有接口返回 JSON 格式数据。基础
 {
   "ok": true,
   "data": {
-    "message": "配置已保存并自动重载，立即生效",
-    "path": "/app/.env",
-    "reloaded": true
+    "message": "配置已保存并立即生效",
+    "login_entry_url": "https://wf.shmtu.edu.cn/yy-sys/pc/home",
+    "is_override": true
   }
 }
 ```
+
+**错误：**
+
+| error | 说明 |
+|-------|------|
+| `permission_denied` | `current_username` 不在 `AUTHORIZED_USERS` 中 |
+| `invalid_url` | 地址不是以 `http://` 或 `https://` 开头的完整 URL |
+| `write_failed` | 数据库写入失败 |
 
 ---
 
