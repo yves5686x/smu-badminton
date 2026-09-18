@@ -39,6 +39,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO_ROOT, "src"))
 
 from smu_badminton import config  # noqa: E402  触发 .env 加载
+from smu_badminton.settings_store import get_login_entry_url  # noqa: E402
 from smu_badminton.http_utils import requests_post_with_retry  # noqa: E402
 from smu_badminton.booking_api import (  # noqa: E402
     build_headers,
@@ -236,7 +237,7 @@ def main() -> int:
         password = getpass.getpass("密码: ")
 
     log(f"登录中: {username[:4]}***")
-    tokens = get_token_cached(config.CAS_LOGIN_URL, config.CAS_CAPTCHA_URL, username, password, ttl_seconds=900)
+    tokens = get_token_cached(get_login_entry_url(), config.CAS_CAPTCHA_URL, username, password, ttl_seconds=900)
     if not tokens or not tokens.get("access_token"):
         log("登录失败，终止")
         return 1

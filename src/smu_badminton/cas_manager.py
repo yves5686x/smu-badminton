@@ -20,7 +20,7 @@ from .booking_api import (
 
 # 从各模块导入
 from .cas_login import login_with_retry
-from .config import CAS_CAPTCHA_URL, CAS_LOGIN_URL
+from .config import CAS_CAPTCHA_URL
 
 # 导入核心工具模块
 from .core_utils import (
@@ -36,6 +36,9 @@ from .http_utils import (
     get_network_time,
     get_target_datetime_from_network,
 )
+
+# 登录入口 URL 属 L3 运行时可变配置（数据库 app_settings），须按调用读取
+from .settings_store import get_login_entry_url
 from .token_profile import (
     cache_token_for_user,
     get_cached_token,
@@ -190,7 +193,8 @@ def resolve_login_credentials(
             resolved_login_url = resolved_login_url or account.get("login_url") or ""
             resolved_captcha_url = resolved_captcha_url or account.get("captcha_url") or ""
 
-    resolved_login_url = resolved_login_url or CAS_LOGIN_URL
+    # 登录入口 URL 是 L3 运行时可变配置：必须每次读取，不能在导入期取快照
+    resolved_login_url = resolved_login_url or get_login_entry_url()
     resolved_captcha_url = resolved_captcha_url or CAS_CAPTCHA_URL
 
     if not resolved_password:

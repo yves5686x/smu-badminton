@@ -10,12 +10,11 @@ CAS 认证流程模块。
 """
 import base64
 import logging
-import os
 import re
 import time
 from dataclasses import dataclass
 from enum import Enum
-from urllib.parse import parse_qs, quote, unquote, urlencode, urljoin, urlparse
+from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
 import requests
 from lxml import html
@@ -23,10 +22,10 @@ from lxml import html
 from .cas_ocr import predict_validate_code
 from .config import (
     CAS_CAPTCHA_URL,
-    CAS_ORIGIN,
-    OAUTH_CLIENT_ID,
     WF_HOME_URL,
     WF_ORIGIN,
+    WF_SSO_AUTHORIZE_PATH,
+    build_wf_authorize_url,
 )
 
 logger = logging.getLogger(__name__)
@@ -75,18 +74,17 @@ def _absolute_url(base_url: str, maybe_relative: str) -> str:
     return urljoin(base_url, maybe_relative)
 
 
-def _build_wf_authorize_url(ret_url: str | None = None) -> str:
-    ret = ret_url or f"{WF_ORIGIN}/yy-sys/pc/home"
-    callback = f"{WF_ORIGIN}/yy-sys/oidc-callback?retUrl={ret}"
-    params = {
-        "client_id": OAUTH_CLIENT_ID,
-        "redirect_uri": callback,
-        "response_type": "id_token token",
-        "scope": "data openid process task app submit process_edit start profile",
-        "state": os.urandom(16).hex(),
-        "nonce": os.urandom(16).hex(),
-    }
-    return f"{WF_ORIGIN}/sso/oauth2/authorize?{urlencode(params, quote_via=quote)}"
+def _origin_of(url: str) -> str:
+    """取 URL 的 scheme://host[:port]，用作请求的 ``Origin`` / 同源判定基准。
+
+    ``Origin`` 必须与登录页同源，而登录页 host 是沿重定向链解析出来的实值
+    （学校侧可能再次换主机名）。此前它是一个独立的 ``CAS_ORIGIN`` 配置项，
+    实际已从 ``sso.`` 漂移回 ``cas.``——派生值不该再单独配置。
+    """
+    parsed = urlparse(url or "")
+    if not parsed.scheme or not parsed.netloc:
+        return ""
+    return f"{parsed.scheme}://{parsed.netloc}"
 
 
 def _is_cas_login_url(url: str) -> bool:
@@ -115,17 +113,17 @@ def _resolve_cas_login_url(session: requests.Session, login_url: str | None, tim
         return start
 
     # 已经是 oauth2 authorize 地址
-    if "/sso/oauth2/authorize" in lower_start:
+    if WF_SSO_AUTHORIZE_PATH.lower() in lower_start:
         pass
     # 已经是 sso 登录地址
     elif "/sso/login" in lower_start:
         pass
     # yy-sys 或其他 wf 页面：基于 retUrl 重建 authorize 地址
     elif start and lower_start.startswith(WF_ORIGIN.lower()):
-        start = _build_wf_authorize_url(ret_url=start)
+        start = build_wf_authorize_url(ret_url=start)
     # 输入为空或无效时兜底
     else:
-        start = _build_wf_authorize_url(ret_url=WF_HOME_URL)
+        start = build_wf_authorize_url(ret_url=WF_HOME_URL)
 
     current = start
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -392,7 +390,7 @@ def cas_login_stable(login_url, captcha_url, username, password) -> LoginResult:
             "User-Agent": headers_get["User-Agent"],
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
             "Content-Type": "application/x-www-form-urlencoded",
-            "Origin": CAS_ORIGIN,
+            "Origin": _origin_of(cas_url),
             "Referer": cas_url,
         }
 
@@ -539,7 +537,7 @@ def attempt_login_with_captcha(
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
         "Content-Type": "application/x-www-form-urlencoded",
-        "Origin": CAS_ORIGIN,
+        "Origin": _origin_of(cas_login_url),
         "Referer": cas_login_url,
     }
 

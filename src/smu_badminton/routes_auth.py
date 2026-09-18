@@ -19,7 +19,7 @@ from .cas_login import (
     login_with_manual_captcha,
     prepare_login_session,
 )
-from .config import AUTHORIZED_USERS, CAS_CAPTCHA_URL, CAS_LOGIN_URL
+from .config import AUTHORIZED_USERS, CAS_CAPTCHA_URL
 from .schemas import (
     CaptchaRequest,
     CaptchaResponse,
@@ -28,6 +28,9 @@ from .schemas import (
     LogoutRequest,
     RefreshRequest,
 )
+
+# 登录入口 URL 属 L3 运行时可变配置（数据库 app_settings），须按请求读取
+from .settings_store import get_login_entry_url
 from .token_profile import (
     cache_token_for_user,
     clear_token_cache,
@@ -78,7 +81,7 @@ async def get_captcha(req: CaptchaRequest):
     _cleanup_captcha_sessions()
 
     try:
-        login_url = req.login_url or CAS_LOGIN_URL
+        login_url = req.login_url or get_login_entry_url()
         captcha_url = req.captcha_url or CAS_CAPTCHA_URL
 
         session, cas_login_url, execution_value, captcha_image, captcha_token, login_page_html = await run_in_threadpool(
@@ -125,7 +128,7 @@ async def api_login(req: LoginRequest):
     _cleanup_captcha_sessions()
 
     try:
-        login_url = req.login_url or CAS_LOGIN_URL
+        login_url = req.login_url or get_login_entry_url()
         captcha_url = req.captcha_url or CAS_CAPTCHA_URL
 
         if req.captcha_code:

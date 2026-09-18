@@ -16,7 +16,6 @@ from typing import Any
 
 from .config import (
     CAS_CAPTCHA_URL,
-    CAS_LOGIN_URL,
     DEFAULT_DEPT_CODE,
     DEFAULT_DEPT_NAME,
     DEFAULT_DEPT_NAME_EN,
@@ -25,6 +24,9 @@ from .config import (
     TOKEN_CACHE_TTL_SEC,
     TOKEN_PROFILE_TTL_SEC,
 )
+
+# 登录入口 URL 属 L3 运行时可变配置（数据库 app_settings），须按调用读取
+from .settings_store import get_login_entry_url
 
 logger = logging.getLogger(__name__)
 
@@ -306,7 +308,7 @@ def save_user_account(
     if not username or not password:
         return False
 
-    login_url = login_url or CAS_LOGIN_URL
+    login_url = login_url or get_login_entry_url()
     captcha_url = captcha_url or CAS_CAPTCHA_URL
     obfuscated_pwd = obfuscate_password(password)
     now = time.time()
@@ -423,7 +425,7 @@ def refresh_token_for_user(username: str, max_attempts: int = 2) -> dict[str, st
         logger.warning("无法刷新 token：未找到用户账号 %s", username)
         return None
 
-    login_url = account.get("login_url") or CAS_LOGIN_URL
+    login_url = account.get("login_url") or get_login_entry_url()
     captcha_url = account.get("captcha_url") or CAS_CAPTCHA_URL
     password = account.get("password")
 

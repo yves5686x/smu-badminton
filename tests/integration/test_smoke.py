@@ -15,7 +15,7 @@ def test_import_cas_manager():
 def test_import_config():
     from smu_badminton import config
     assert hasattr(config, 'WF_ORIGIN')
-    assert hasattr(config, 'CAS_ORIGIN')
+    assert hasattr(config, 'code_defaults')
 
 
 def test_app_health(client):

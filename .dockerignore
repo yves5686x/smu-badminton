@@ -43,6 +43,14 @@ src/smu_badminton/docs/
 *.har
 captcha.png
 
+# 真实配置与数据：绝不允许进镜像层
+# （当前 Dockerfile 逐目录 COPY 不会带上它们，这里是为了防止将来改成 COPY . . 时
+#   把 .env 里的地址/凭据与 data/ 下的库、密钥一起打进镜像）
+.env
+.env.*
+!.env.example
+data/
+
 # Windows / macOS
 Thumbs.db
 Desktop.ini

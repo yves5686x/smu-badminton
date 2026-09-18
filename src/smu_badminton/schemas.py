@@ -84,7 +84,7 @@ class StopJobRequest(BaseModel):
 
 
 class UpdateConfigRequest(BaseModel):
-    login_url: str = Field(..., description="新的 CAS 登录 URL")
+    login_url: str = Field(..., description="新的登录入口 URL；传空串恢复默认（WF 首页）")
     current_username: str = Field(..., description="当前操作用户名，用于权限验证")
 
 

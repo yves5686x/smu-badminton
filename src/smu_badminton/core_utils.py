@@ -361,6 +361,17 @@ def init_db_tables():
         )
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_accounts_username ON user_accounts(username);")
 
+        # 创建运行时可变配置表（L3 层，见 settings_store.py）
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS app_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at REAL NOT NULL
+            );
+            """
+        )
+
     logger.info("数据库表初始化完成")
 
 

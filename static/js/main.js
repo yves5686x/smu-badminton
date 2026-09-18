@@ -67,6 +67,10 @@ const Theme = {
 };
 
 // ============ 配置 ============
+// 登录入口与验证码 URL 的权威来源是服务端：/api/config 下发（L3 数据库 → L4 代码默认）。
+// 这里**不保留**任何硬编码副本——前端在请求里传空串即可，后端会回退到同一权威值
+// （见 routes_auth：req.login_url or get_login_entry_url()）。此前的 cas.shmtu.edu.cn
+// 兜底是第 4 份会漂移的登录地址副本，已删除。
 window.login_url = '';
 window.captcha_url = '';
 window.__auth = null;
@@ -81,11 +85,11 @@ async function loadConfig() {
             window.login_url = json.data.login_url || '';
             window.captcha_url = json.data.captcha_url || '';
             window._configLoaded = true;
+        } else {
+            console.error('配置接口返回异常，将由服务端兜底登录入口:', json);
         }
     } catch (e) {
-        console.error('加载配置失败:', e);
-        window.login_url = window.login_url || 'https://cas.shmtu.edu.cn/cas/login?service=https%3A%2F%2Fwf.shmtu.edu.cn%2Fsso%2Flogin%3Fredirect_uri%3Dhttps%253A%252F%252Fwf.shmtu.edu.cn%252Fsso%252Foauth2%252Fauthorize%253Fclient_id%253DkwxKbMKq3Nafw2mApFZz%2526redirect_uri%253Dhttps%25253A%25252F%25252Fwf.shmtu.edu.cn%25252Fyy-sys%25252Foidc-callback%25253FretUrl%25253Dhttps%25253A%25252F%25252Fwf.shmtu.edu.cn%25252Fyy-sys%25252Fpc%25252Fhome%2526response_type%253Did_token%252520token%2526scope%253Ddata%252520openid%252520process%252520task%252520app%252520submit%252520process_edit%252520start%252520profile%2526state%253D0bfb3977af75474bb82d611a7e4dde78%2526nonce%253Da9c8b134679249aaad587fc2200198a7%26x_client%3Dcas';
-        window.captcha_url = window.captcha_url || 'https://cas.shmtu.edu.cn/cas/captcha';
+        console.error('加载配置失败，将由服务端兜底登录入口:', e);
     }
 }
 

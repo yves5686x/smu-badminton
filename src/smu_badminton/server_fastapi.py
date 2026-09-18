@@ -15,7 +15,14 @@ from fastapi.responses import FileResponse, ORJSONResponse, Response
 from starlette.staticfiles import StaticFiles
 
 from .cas_manager import booking_manager
-from .config import BASE_DIR, JOB_RETENTION_SEC, TRUSTED_PROXIES, UVICORN_RELOAD
+from .config import (
+    BASE_DIR,
+    JOB_RETENTION_SEC,
+    SERVER_PORT,
+    TRUSTED_PROXIES,
+    UVICORN_RELOAD,
+    get_missing_required_settings,
+)
 from .core_utils import close_db_pool, init_db_tables
 from .locks import locks_cleanup
 from .middleware import MetricsMiddleware, RateLimitMiddleware
@@ -47,6 +54,8 @@ async def lifespan(app: FastAPI):
     _lock_cleanup_task = asyncio.create_task(locks_cleanup())
     _jobs_cleanup_task = asyncio.create_task(_jobs_cleanup())
     _lbookings_cleanup_task = asyncio.create_task(_stale_local_bookings_cleanup())
+    for warning in get_missing_required_settings():
+        logger.warning("%s", warning)
     try:
         yield
     finally:
@@ -185,7 +194,7 @@ def main():
     uvicorn.run(
         "smu_badminton.server_fastapi:app",
         host="0.0.0.0",
-        port=int(os.getenv("SERVER_PORT", "5002")),
+        port=SERVER_PORT,
         reload=UVICORN_RELOAD,
         proxy_headers=True,
         # 使用可信代理列表，而非 "*"
