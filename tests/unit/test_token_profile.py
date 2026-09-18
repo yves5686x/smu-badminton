@@ -1,10 +1,20 @@
 """Token 缓存和刷新单元测试。"""
+import base64
+import json
+
 from smu_badminton.token_profile import (
     cache_token_for_user,
     clear_token_cache,
     find_user_by_access_token,
     get_cached_token,
+    session_exp_epoch,
 )
+
+
+def _jwt_with_exp(exp: float) -> str:
+    """构造只含 exp 的假 JWT（decode_jwt_payload 不校验签名，够用）。"""
+    payload = base64.urlsafe_b64encode(json.dumps({"exp": exp}).encode("utf-8")).rstrip(b"=")
+    return f"eyJhbGciOiJIUzI1NiJ9.{payload.decode('ascii')}.sig"
 
 
 def test_cache_and_get_token():
@@ -81,3 +91,39 @@ def test_clear_token_cache_all():
 
     assert get_cached_token("user1") is None
     assert get_cached_token("user2") is None
+
+
+# ============= session_exp_epoch：access_token 读不出 exp 时回退 id_token =============
+
+
+def test_session_exp_prefers_access_token():
+    """access_token 本身是 JWT 时优先用它，不受 id_token 影响。"""
+    access_exp, id_exp = 1_800_000_000.0, 1_900_000_000.0
+    tokens = {"access_token": _jwt_with_exp(access_exp), "id_token": _jwt_with_exp(id_exp)}
+    assert session_exp_epoch(tokens) == access_exp
+
+
+def test_session_exp_falls_back_to_id_token():
+    """真机实测形态：access_token 是 32 字符 opaque token（读不出 exp）→ 回退 id_token。
+
+    这是回归用例。此前 cas_manager 只读 access_token，``exp_epoch is None`` 会让
+    T-0 前的 token 预检被静默跳过，等于那段"杜绝 T-0 触发重新登录"的逻辑从未生效。
+    """
+    opaque = "2f83032d827f" + "c" * 20  # 32 字符、无 "."，decode_jwt_payload 返回 None
+    assert len(opaque) == 32
+
+    id_exp = 1_900_000_000.0
+    tokens = {"access_token": opaque, "id_token": _jwt_with_exp(id_exp)}
+    assert session_exp_epoch(tokens) == id_exp
+
+
+def test_session_exp_none_when_both_unreadable():
+    """两个 token 都读不出 exp 时返回 None（调用方需容忍）。"""
+    assert session_exp_epoch({"access_token": "opaque-token", "id_token": "not-a-jwt"}) is None
+
+
+def test_session_exp_handles_missing_tokens():
+    """空值不应抛异常。"""
+    assert session_exp_epoch(None) is None
+    assert session_exp_epoch({}) is None
+    assert session_exp_epoch({"access_token": "opaque-token"}) is None

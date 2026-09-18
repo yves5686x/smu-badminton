@@ -103,6 +103,28 @@ def token_exp_epoch(access_token: str) -> float | None:
         return None
 
 
+def session_exp_epoch(tokens: dict[str, Any] | None) -> float | None:
+    """会话过期时刻（Unix 秒）：先读 access_token，读不出再回退 id_token。
+
+    为什么需要回退
+    --------------
+    2026-09-18 真机实测（``scripts/verify_real_login.py``）：SMU 的 ``access_token``
+    是不带 payload 的 opaque token，只有 32 字符，``token_exp_epoch`` 对它恒返回 None；
+    而 ``id_token`` 是标准 JWT（约 1168 字符，exp 剩余约 7200s）。
+
+    抢票预检若只读 access_token，``exp_epoch is None`` 会让整个判断被**静默跳过**
+    ——注释写着"杜绝 T-0 触发重新登录"，实际那个判断从未生效。所以这里做回退。
+
+    注：回退到 id_token 的 exp 是合理近似——OIDC 下 id_token 与 SSO 会话同寿。
+    """
+    if not tokens:
+        return None
+    return (
+        token_exp_epoch(tokens.get("access_token", ""))
+        or token_exp_epoch(tokens.get("id_token", ""))
+    )
+
+
 def _cleanup_profile_cache():
     """清理过期的 profile 缓存项。"""
     now = time.time()
