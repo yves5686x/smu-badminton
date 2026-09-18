@@ -649,6 +649,62 @@ def find_resource_detail(
         return None
 
 
+# ============= GraphQL 响应展开（预约结果判定的唯一咽喉点） =============
+
+# 上游业务层「成功」的 code 取值（历史数据里两种都出现过）
+BUSINESS_SUCCESS_CODES = ("0", "success")
+
+
+def unwrap_graphql_result(resp: Any) -> dict[str, Any]:
+    """把 GraphQL 响应体展开为业务层结果对象。
+
+    上游返回形如 ``{"data": {"saveAppointmentInformationAll": {code, messages, ...}}}``，
+    业务字段在第二层。本模块所有 query 调用点都做了同样的展开，但预约 mutation 的调用方
+    历史上直接对顶层取 ``code``，导致**真实成功被判定为失败**（顶层没有 code 字段）。
+    这里统一收口：
+
+    - 嵌套结构：展开到第一层业务对象；
+    - 已经是扁平结构（部分网关会直接返回业务体）：原样返回；
+    - ``{"data": null, "errors": [...]}`` 之类的错误体：原样返回（不含 code，判失败）。
+
+    **幂等**：对已展开的业务对象再次调用不会二次下钻。调用方常把展开后的结果继续传给
+    ``business_messages`` 等辅助函数，若不做这层保护，一旦上游业务层将来新增 ``data``
+    字段就会误取子节点。
+
+    Returns:
+        业务层结果字典；无法识别时返回 {}。
+    """
+    if not isinstance(resp, dict):
+        return {}
+    # 已展开：业务层以 code 为标识字段，见到即原样返回（保证幂等）
+    if "code" in resp:
+        return resp
+    data = resp.get("data")
+    if isinstance(data, dict):
+        for key, value in data.items():
+            if key == "__typename":
+                continue
+            if isinstance(value, dict):
+                return value
+        return {}
+    return resp
+
+
+def is_business_success(resp: Any) -> bool:
+    """判断预约类 mutation 是否真正成功（兼容嵌套与扁平两种响应体）。"""
+    inner = unwrap_graphql_result(resp)
+    return str(inner.get("code", "")).lower() in BUSINESS_SUCCESS_CODES
+
+
+def business_messages(resp: Any) -> str:
+    """提取业务层 messages（用于日志与错误说明），无消息时返回空串。"""
+    inner = unwrap_graphql_result(resp)
+    msgs = inner.get("messages") or inner.get("messages_en") or []
+    if isinstance(msgs, (list, tuple)):
+        return "; ".join(str(m) for m in msgs)
+    return str(msgs)
+
+
 # ============= 预约 API =============
 
 def fetch_resource_time_id(

@@ -7,14 +7,17 @@ from typing import Any
 
 from .booking_api import (
     _shared_session,
+    business_messages,
     check_appointment_cancel_time,
     check_resource_time_slot_capacity,
     fetch_resource_time_id,
     find_my_appointment_id,
+    is_business_success,
     list_appointments_for_account,
     make_appointment,
     resolve_user_info,
     solve_and_verify_slide_captcha,
+    unwrap_graphql_result,
     update_appointment_state,
 )
 
@@ -44,7 +47,7 @@ from .token_profile import (
     get_cached_token,
     get_user_account,
     refresh_token_for_user,
-    token_exp_epoch,
+    session_exp_epoch,
 )
 
 # 配置日志
@@ -77,6 +80,12 @@ RUSH_REQUEST_TIMEOUT_SEC = 4
 # token exp 距目标时刻不足该秒数时提前重新登录
 TOKEN_EXP_BUFFER_SEC = 120
 
+# T-0 兜底解析「资源/时段 ID」的重试次数与间隔。
+# 上游放号晚于预取窗口（常见：预约日期 21:00 才放出）时，预取必然拿不到 ID，
+# 此时不能在预取阶段就把任务判死，改由发射线程在 T-0 现场解析后立即提交。
+T0_RESOLVE_RETRIES = 3
+T0_RESOLVE_GAP_SEC = 0.15
+
 
 def _classify_upstream_response(resp) -> str:
     """对 saveAppointmentInformationAll 的响应分类（展开 GraphQL 包体）。
@@ -84,16 +93,13 @@ def _classify_upstream_response(resp) -> str:
     Returns:
         success / banned / captcha_error / other
     """
-    if not isinstance(resp, dict):
+    inner = unwrap_graphql_result(resp)
+    if not inner:
         return "other"
-    inner = resp
-    data = resp.get("data")
-    if isinstance(data, dict) and isinstance(data.get("saveAppointmentInformationAll"), dict):
-        inner = data["saveAppointmentInformationAll"]
     code = str(inner.get("code", "")).lower()
     if code in ("0", "success"):
         return "success"
-    msgs = " ".join(str(m) for m in inner.get("messages") or [])
+    msgs = business_messages(inner)
     if any(k in msgs for k in ("频繁", "禁用", "禁止", "解禁")):
         return "banned"
     if "验证码" in msgs or "captcha" in msgs.lower():
@@ -179,7 +185,7 @@ def resolve_login_credentials(
     """合并请求携带的凭据与服务端保存的账号，返回 (login_url, captcha_url, password)。
 
     请求未带密码时自动回退到服务端保存的凭据（登录成功后自动保存），
-    这是预约链路免密发送的唯一入口；URL 缺省时依次用保存值、配置默认值兜底。
+    这是预约链路免密发送的唯一入口；URL 缺省时依次用保存值、登录入口权威值兜底。
     无任何可用凭据时返回 None。
     """
     resolved_password = password
@@ -869,11 +875,14 @@ class BookingManager:
                     id_token=id_token, captcha_id=captcha_id, captcha_code=captcha_code,
                     user_info=user_info, session=session, allow_retry=False, timeout_seconds=8,
                 )
-                ok = isinstance(resp, dict) and str(resp.get("code", "")).lower() in ("0", "success")
+                ok = is_business_success(resp)
                 if ok:
                     _set(JobState.DONE)
                 else:
-                    logger.info("[任务 %s] 即时预约未成功 kind=%s", job_id[:8], _classify_upstream_response(resp))
+                    logger.info(
+                        "[任务 %s] 即时预约未成功 kind=%s messages=%s",
+                        job_id[:8], _classify_upstream_response(resp), business_messages(resp),
+                    )
                     _set(JobState.FAILED)
             finally:
                 if session is not None:
@@ -927,7 +936,17 @@ class BookingManager:
         target_time_str: str,
         num_threads: int = 5,
         resume_job_id: str | None = None,
+        rollback_local_on_fail: bool = True,
     ) -> str:
+        """创建定时抢票任务。
+
+        Args:
+            rollback_local_on_fail: 任务未成功时是否回滚本地预约占位记录。
+                与 ``start_immediate_booking`` 的同名参数对齐，遵循「谁插入谁回滚」：
+                调用方在启动任务前插了 ``local_bookings`` 记录（如 /api/book/schedule），
+                就应保持默认 True；没插入的调用方（如 /api/jobs/scheduled）传 False，
+                避免误删其他任务依赖的占位记录。
+        """
         # 校验并限制线程数（业务层 clamp）
         num_threads = max(1, min(5, num_threads))
 
@@ -961,10 +980,14 @@ class BookingManager:
 
         cancel_event = threading.Event()
 
-        def run():
+        def _run_impl():
             # ========== 计算目标时刻；长等待到预取窗口 ==========
             target_time = get_target_datetime_from_network(target_time_str, bookdate)
             clock = ClockSync()
+            logger.info(
+                "[任务 %s] 目标时刻=%s（预约日 %s，T-%ds 唤醒）",
+                job_id[:8], target_time.isoformat(), bookdate, PREFETCH_WINDOW_SEC,
+            )
 
             if not _wait_until(target_time, PREFETCH_WINDOW_SEC, cancel_event):
                 self._cleanup_job(job_id, JobState.CANCELLED, username=username, bookdate=bookdate, kssj=kssj, jssj=jssj, resources_name=resources_name)
@@ -974,14 +997,21 @@ class BookingManager:
             clock.sync(samples=3)
 
             # ========== 登录（含 JWT exp 预检，杜绝 T-0 触发重新登录）==========
+            # 注：实测 access_token 是 opaque token（32 字符，读不出 exp），
+            # 故用 session_exp_epoch 回退读 id_token 的 exp，详见 token_profile。
             tokens = get_token_cached(login_url, captcha_url, username, password, ttl_seconds=900)
+            if not tokens or not tokens.get("access_token"):
+                # 预取窗口是登录的最后机会，网络抖动时再给一次；仍失败才放弃
+                logger.warning("[任务 %s] 登录失败，1s 后重试一次", job_id[:8])
+                time.sleep(1.0)
+                tokens = get_token_cached(login_url, captcha_url, username, password, ttl_seconds=900)
             if not tokens or not tokens.get("access_token"):
                 self._cleanup_job(job_id, JobState.FAILED, username=username, bookdate=bookdate, kssj=kssj, jssj=jssj, resources_name=resources_name)
                 return
             access_token = tokens["access_token"]
             id_token = tokens.get("id_token", "")
 
-            exp_epoch = token_exp_epoch(access_token)
+            exp_epoch = session_exp_epoch(tokens)
             if exp_epoch is not None and exp_epoch < target_time.timestamp() + TOKEN_EXP_BUFFER_SEC:
                 logger.info("[任务 %s] token exp=%d 临近/早于目标时刻，提前刷新", job_id[:8], int(exp_epoch))
                 refreshed = refresh_token_for_user(username)
@@ -1005,25 +1035,67 @@ class BookingManager:
             except Exception:
                 pass
 
-            # ========== 预取资源/时段 ID 与用户信息（省掉 T-0 的 RTT）==========
-            result = fetch_resource_time_id(access_token, bookdate, resources_name, kssj, jssj, id_token=id_token, session=session)
-            if not result:
-                self._cleanup_job(job_id, JobState.FAILED, username=username, bookdate=bookdate, kssj=kssj, jssj=jssj, resources_name=resources_name)
-                return
-            resource_id, time_id, open_captcha_verify = result
+            # ========== 预取资源/时段 ID 与用户信息 ==========
+            # 上游若在 T-0 才放号，T-75s 的预取必然拿不到资源/时段 ID。此时不能把任务判死，
+            # 而是转入 T-0 兜底：发射线程在目标时刻现场解析一次再提交（见 worker）。
+            target: dict[str, Any] = {
+                "resource_id": "", "time_id": "",
+                "open_captcha_verify": "", "user_info": None,
+            }
+            target_lock = threading.Lock()
 
-            user_info = resolve_user_info(access_token, id_token=id_token)
+            def resolve_target(retries: int = 1, gap_sec: float = 0.2) -> bool:
+                """解析资源/时段 ID 与用户信息（线程安全、只解一次、失败可重试）。"""
+                with target_lock:
+                    if target["time_id"]:
+                        return True
+                    for attempt in range(max(1, retries)):
+                        if cancel_event.is_set():
+                            return False
+                        result = fetch_resource_time_id(
+                            access_token, bookdate, resources_name, kssj, jssj,
+                            id_token=id_token, session=session,
+                        )
+                        if result:
+                            target["resource_id"], target["time_id"], target["open_captcha_verify"] = result
+                            if target["user_info"] is None:
+                                target["user_info"] = resolve_user_info(access_token, id_token=id_token, session=session)
+                            return True
+                        if attempt < retries - 1:
+                            time.sleep(gap_sec)
+                    return False
+
+            if resolve_target():
+                logger.info(
+                    "[任务 %s] 预取完成: time_id=%s captcha=%s",
+                    job_id[:8], target["time_id"], target["open_captcha_verify"] or "0",
+                )
+            else:
+                logger.warning(
+                    "[任务 %s] 预取未拿到资源/时段（上游通常 T-0 才放号），转入 T-0 兜底解析",
+                    job_id[:8],
+                )
 
             self._safe_update_status(job_id, JobState.RUNNING)
 
             # ========== 验证码预取池：一次性凭证，每枪一份，失败自动重试 ==========
+            # 需要预热的两类情况：
+            #   1. 预取已知资源开启滑块校验（open_captcha_verify == "1"）；
+            #   2. 预取没拿到资源、校验开关**未知** —— 此时投机预热。
+            #      验证码凭证只绑 token、不绑具体场次（gen_slide_captcha(token) 无场次入参），
+            #      多解一份的代价远小于 T-0 现场解滑块（数秒），后者等于直接放弃抢票。
             shots = max(1, min(num_threads, MAX_UPSTREAM_BURST))
             captcha_pool: list[tuple[str, str]] = []
-            need_captcha = open_captcha_verify == "1"
-            if need_captcha:
+            captcha_flag = target["open_captcha_verify"]
+            need_captcha = captcha_flag == "1"
+            if need_captcha or not captcha_flag:
                 # 池构建最晚到 T-35s：留出对齐/发射的余量，不再临阵解新码
                 pool_deadline = target_time.timestamp() - CAPTCHA_HARD_STOP_BEFORE_SEC
-                logger.info("[任务 %s] 资源需要滑块验证码：构建预取池（目标 %d 份）", job_id[:8], shots)
+                logger.info(
+                    "[任务 %s] %s：构建验证码预取池（目标 %d 份）",
+                    job_id[:8], "资源需要滑块验证码" if need_captcha else "校验开关未知，投机预热",
+                    shots,
+                )
                 while len(captcha_pool) < shots and time.time() < pool_deadline:
                     if cancel_event.is_set():
                         break
@@ -1046,10 +1118,11 @@ class BookingManager:
             results_lock = threading.Lock()
             results: list[dict[str, Any]] = []
 
-            def worker(tid: int):
+            def _worker_impl(tid: int):
                 creds = captcha_pool[tid] if tid < len(captcha_pool) else ("", "")
-                if need_captcha and not creds[0]:
-                    logger.warning("[任务 %s] 线程%d 无验证码凭证，仍将尝试提交", job_id[:8], tid)
+                if not creds[0]:
+                    # 预取未成功时校验开关要到 T-0 解析完才知道，届时再决定是否需要现场求解
+                    logger.info("[任务 %s] 线程%d 无可用验证码凭证", job_id[:8], tid)
 
                 # 关键窗口：用校准后的本地钟等待，零 HTTP
                 if not _wait_until(target_time, 0, cancel_event, now_fn=clock.now):
@@ -1073,22 +1146,57 @@ class BookingManager:
                         results.append({"tid": tid, "ok": False, "kind": "skipped_after_success"})
                     return
 
+                # T-0 兜底：预取阶段未拿到资源/时段 ID（上游放号晚于 T-75s）时现场解析。
+                # 只解一次（锁内复用），其余枪直接读结果。
+                if not resolve_target(retries=T0_RESOLVE_RETRIES, gap_sec=T0_RESOLVE_GAP_SEC):
+                    logger.error("[任务 %s] 线程%d T-0 仍未解析到资源/时段，本枪放弃", job_id[:8], tid)
+                    with results_lock:
+                        results.append({"tid": tid, "ok": False, "kind": "resolve_failed"})
+                    return
+
+                # 凭证只在资源确实开启滑块校验时提交：投机预热的池在「不需要校验」时
+                # 会多余，带上反而可能被上游当成脏参数。
+                shot_captcha_id, shot_captcha_code = "", ""
+                if target["open_captcha_verify"] == "1":
+                    shot_captcha_id, shot_captcha_code = creds
+                    if not shot_captcha_id:
+                        logger.info("[任务 %s] 线程%d 池中无凭证，T-0 现场求解滑块验证码", job_id[:8], tid)
+                        fresh = solve_and_verify_slide_captcha(access_token)
+                        if fresh:
+                            shot_captcha_id, shot_captcha_code = fresh
+                        else:
+                            logger.warning("[任务 %s] 线程%d 现场求解失败，将裸提交", job_id[:8], tid)
+
+                user_info = target["user_info"] or resolve_user_info(access_token, id_token=id_token, session=session)
+
                 resp = make_appointment(
-                    access_token, time_id, resource_id, bookdate, kssj, jssj,
+                    access_token, target["time_id"], target["resource_id"], bookdate, kssj, jssj,
                     id_token=id_token,
-                    captcha_id=creds[0], captcha_code=creds[1],
+                    captcha_id=shot_captcha_id, captcha_code=shot_captcha_code,
                     user_info=user_info,
                     session=session,
                     allow_retry=False,
                     timeout_seconds=RUSH_REQUEST_TIMEOUT_SEC,
                 )
-                ok = isinstance(resp, dict) and str(resp.get("code", "")).lower() in ("0", "success")
+                ok = is_business_success(resp)
                 kind = _classify_upstream_response(resp)
-                logger.info("[任务 %s] 线程%d 提交结果 ok=%s kind=%s", job_id[:8], tid, ok, kind)
+                logger.info(
+                    "[任务 %s] 线程%d 提交结果 ok=%s kind=%s messages=%s",
+                    job_id[:8], tid, ok, kind, business_messages(resp),
+                )
                 if ok:
                     success_event.set()
                 with results_lock:
                     results.append({"tid": tid, "ok": ok, "kind": kind})
+
+            def worker(tid: int):
+                """发射线程入口：任何异常都必须落进 results，否则任务会静默停在 running。"""
+                try:
+                    _worker_impl(tid)
+                except Exception as e:
+                    logger.exception("[任务 %s] 线程%d 执行异常: %s", job_id[:8], tid, e)
+                    with results_lock:
+                        results.append({"tid": tid, "ok": False, "kind": "exception"})
 
             threads = [threading.Thread(target=worker, args=(i,)) for i in range(shots)]
             for t in threads:
@@ -1106,11 +1214,35 @@ class BookingManager:
                 )
             if success_count > 0:
                 self._safe_update_status(job_id, JobState.DONE)
+                with self._lock:
+                    self._jobs.pop(job_id, None)
+            elif rollback_local_on_fail:
+                # 失败必须回滚本地预约记录（走 _cleanup_job 而非只改状态）：
+                # local_bookings 既是当天冲突判定的依据，也是前端格子「已占用」的来源，
+                # 留着会让用户此后完全无法重试该日期，界面上还挂着一条上游并不存在的预约。
+                self._cleanup_job(
+                    job_id, JobState.FAILED, username=username, bookdate=bookdate,
+                    kssj=kssj, jssj=jssj, resources_name=resources_name,
+                )
             else:
                 self._safe_update_status(job_id, JobState.FAILED)
+                with self._lock:
+                    self._jobs.pop(job_id, None)
 
-            with self._lock:
-                self._jobs.pop(job_id, None)
+        def run():
+            """任务主线程入口：异常兜底，避免任务永远停在 scheduled/running。"""
+            try:
+                _run_impl()
+            except Exception as e:
+                logger.exception("[任务 %s] 抢票任务异常终止: %s", job_id[:8], e)
+                # 仅在非终态时回滚，避免抹掉已经成功的预约记录
+                if self._get_current_status(job_id) in ("scheduled", "running"):
+                    self._cleanup_job(
+                        job_id, JobState.FAILED, username=username, bookdate=bookdate,
+                        kssj=kssj, jssj=jssj, resources_name=resources_name,
+                    )
+                with self._lock:
+                    self._jobs.pop(job_id, None)
 
         th = threading.Thread(target=run, daemon=True)
         meta = {
@@ -1223,19 +1355,18 @@ def book_badminton_slot(
     finally:
         session.close()
 
-    # 判断预约是否成功
+    # 判断预约是否成功（业务字段在 GraphQL 响应的 data.<mutation> 层，见 unwrap_graphql_result）
     logger.info("make_appointment 返回: %s", resp_json)
-    if resp_json and isinstance(resp_json, dict):
-        code = resp_json.get("code", "")
-        status = "done" if (code == "success" or code == "0") else "failed"
-        if status == "failed":
-            logger.warning("预约失败: code=%s, messages=%s", code, resp_json.get("messages"))
-    else:
-        status = "failed"
-        logger.warning("make_appointment 返回无效响应: %s", resp_json)
+    ok = is_business_success(resp_json)
+    if not ok:
+        logger.warning(
+            "预约失败: kind=%s messages=%s",
+            _classify_upstream_response(resp_json), business_messages(resp_json),
+        )
+    _record("done" if ok else "failed")
 
-    _record(status)
-
-    return success_response(resp_json)
+    if ok:
+        return success_response(resp_json)
+    return {"ok": False, "error": "booking_rejected", "data": resp_json}
 
 

@@ -126,6 +126,8 @@ async def api_book_schedule(req: ScheduleRequest) -> ScheduleResponse:
             login_url=req.login_url, captcha_url=req.captcha_url, username=req.username,
             password=req.password, bookdate=req.bookdate, kssj=req.kssj, jssj=req.jssj,
             resources_name=req.resources_name, target_time_str=req.target_time_str, num_threads=req.num_threads,
+            # 上面已插入 local_bookings 占位记录，抢票失败时必须由任务回滚（默认 True，此处显式写出）
+            rollback_local_on_fail=True,
         )
         return ScheduleResponse(ok=True, data={"scheduled": True, "job_id": job_id})
     except Exception as e:

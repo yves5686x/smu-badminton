@@ -73,6 +73,8 @@ async def api_jobs_scheduled(req: JobScheduledRequest):
         login_url=req.login_url, captcha_url=req.captcha_url, username=req.username,
         password=req.password, bookdate=req.bookdate, kssj=req.kssj, jssj=req.jssj,
         resources_name=req.resources_name, target_time_str=req.target_time_str, num_threads=req.num_threads,
+        # 本路由不插 local_bookings 占位记录，失败时也就不该去删别人的
+        rollback_local_on_fail=False,
     )
     return {"ok": True, "data": {"job_id": job_id}}
 
