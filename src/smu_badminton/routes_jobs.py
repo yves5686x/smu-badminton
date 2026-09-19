@@ -3,16 +3,18 @@
 
 包含：任务列表、停止任务、metrics。
 """
+
 import logging
 import os
 
 from fastapi import APIRouter
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 
+from .booking_service import booking_service
 from .cas_manager import booking_manager
 from .config import BASE_DIR
 from .middleware import snapshot_metrics
-from .routes_booking import _insert_local_booking, booking_precheck
 from .schemas import (
     JobImmediateRequest,
     JobScheduledRequest,
@@ -20,7 +22,6 @@ from .schemas import (
     StopByParamsRequest,
     StopJobRequest,
 )
-from .token_profile import find_user_by_access_token, has_saved_account
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,7 @@ router = APIRouter(tags=["jobs"])
 
 
 # ============= 页面路由 =============
+
 
 @router.get("/jobs")
 async def jobs_page():
@@ -41,42 +43,15 @@ async def jobs_page():
 
 # ============= API 路由 =============
 
+
 @router.post("/api/jobs/immediate")
 async def api_jobs_immediate(req: JobImmediateRequest):
-    """创建即时预约任务（异步：立即返回 job_id，结果经任务轮询获取）。
-
-    与同步的 /api/book 共享同一套前置校验与本地占位记录；
-    任务失败/跳过时由后台线程回滚占位记录。
-    """
-    error, _lock = await booking_precheck(req)
-    if error:
-        return {"ok": False, "error": error}
-
-    insert_err = _insert_local_booking(req.username, req.bookdate, req.resources_name, req.kssj, req.jssj)
-    if insert_err:
-        return {"ok": False, "error": insert_err}
-
-    job_id = booking_manager.start_immediate_booking(
-        login_url=req.login_url, captcha_url=req.captcha_url, username=req.username,
-        password=req.password, bookdate=req.bookdate, kssj=req.kssj, jssj=req.jssj,
-        resources_name=req.resources_name, rollback_local_on_fail=True,
-    )
-    return {"ok": True, "data": {"job_id": job_id}}
+    return await run_in_threadpool(booking_service.submit, **req.model_dump())
 
 
 @router.post("/api/jobs/scheduled", response_model=JobsListResponse)
 async def api_jobs_scheduled(req: JobScheduledRequest):
-    """创建定时预约任务。"""
-    if not req.password and not has_saved_account(req.username):
-        return {"ok": False, "error": "no_saved_credentials"}
-    job_id = booking_manager.start_scheduled_booking(
-        login_url=req.login_url, captcha_url=req.captcha_url, username=req.username,
-        password=req.password, bookdate=req.bookdate, kssj=req.kssj, jssj=req.jssj,
-        resources_name=req.resources_name, target_time_str=req.target_time_str, num_threads=req.num_threads,
-        # 本路由不插 local_bookings 占位记录，失败时也就不该去删别人的
-        rollback_local_on_fail=False,
-    )
-    return {"ok": True, "data": {"job_id": job_id}}
+    return await run_in_threadpool(booking_service.submit, **req.model_dump(), scheduled=True)
 
 
 @router.get("/api/jobs")
@@ -87,7 +62,7 @@ async def api_jobs_list(username: str | None = None):
     不提供时返回全部（任务监控页使用）。
     """
     jobs = booking_manager.list_jobs()
-    db_jobs = booking_manager.list_scheduled_jobs()
+    db_jobs = await run_in_threadpool(booking_service.store.list_jobs, username)
     if username:
         jobs = [j for j in jobs if (j.get("username") or j.get("params", {}).get("username")) == username]
         db_jobs = [j for j in db_jobs if j.get("username") == username]
@@ -97,7 +72,7 @@ async def api_jobs_list(username: str | None = None):
 @router.get("/api/schedule/{job_id}")
 async def api_schedule_status(job_id: str):
     """获取任务状态（读数据库持久化状态，含历史任务）。"""
-    detail = booking_manager.get_job_detail(job_id)
+    detail = await run_in_threadpool(booking_service.store.detail, job_id)
     if not detail:
         return {"ok": False, "error": "job_not_found"}
     return {"ok": True, "data": detail}
@@ -115,7 +90,7 @@ async def api_jobs_stop(job_id: str, req: StopJobRequest):
     """
     owner = None
     try:
-        owner = booking_manager.get_job_owner(job_id)
+        owner = await run_in_threadpool(booking_manager.get_job_owner, job_id)
     except Exception as e:
         logger.warning(f"获取任务所有者失败: {job_id}, {e}")
         return {"ok": False, "error": "job_lookup_failed", "message": "无法获取任务信息"}
@@ -127,7 +102,7 @@ async def api_jobs_stop(job_id: str, req: StopJobRequest):
         logger.warning(f"权限拒绝：用户 {req.current_username} 试图停止 {owner} 的任务 {job_id}")
         return {"ok": False, "error": "permission_denied", "message": "无权停止他人的任务"}
 
-    ok = booking_manager.stop_job(job_id)
+    ok = await run_in_threadpool(booking_manager.stop_job, job_id)
     return {"ok": ok, "data": {"job_id": job_id}}
 
 
@@ -141,19 +116,16 @@ async def api_jobs_stop_by_params(req: StopByParamsRequest):
         logger.warning(f"用户 {req.current_username} 尝试取消 {req.username} 的任务（权限拒绝）")
         return {"ok": False, "error": "permission_denied", "message": "无权取消其他用户的预约任务"}
 
-    id_token = ""
-    if req.access_token:
-        _, id_token = find_user_by_access_token(req.access_token)
-
-    result = booking_manager.stop_by_params(
-        username=req.username, bookdate=req.bookdate, kssj=req.kssj, jssj=req.jssj,
-        resources_name=req.resources_name,
-        access_token=req.access_token,
-        id_token=id_token,
-    )
+    params = req.model_dump(exclude={"current_username"})
+    result = await run_in_threadpool(booking_service.cancel, **params)
     logger.info(
         "按参数停止: %s - %s %s-%s stopped=%s upstream=%s",
-        req.username, req.bookdate, req.kssj, req.jssj, result.get("stopped"), result.get("upstream_status"),
+        req.username,
+        req.bookdate,
+        req.kssj,
+        req.jssj,
+        result.get("stopped"),
+        result.get("upstream_status"),
     )
     return {"ok": True, "data": result}
 

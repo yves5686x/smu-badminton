@@ -100,7 +100,7 @@ def run_case(name, fetch_seq, make_resp, expect_status, *, checks=None, lead_sec
     if pool_window is not None:
         cm.CAPTCHA_HARD_STOP_BEFORE_SEC = -pool_window
 
-    cm._shared_session = lambda: FakeSession()
+    cm.create_session = lambda: FakeSession()
     cm.get_token_cached = lambda *a, **k: {"access_token": "aa.bb.cc", "id_token": "id"}
     cm.session_exp_epoch = lambda t: None
     cm.list_appointments_for_account = lambda *a, **k: []
@@ -280,7 +280,7 @@ def main() -> int:
         post_check=_record_kept,
     ))
 
-    # H: rollback_local_on_fail=False（如 /api/jobs/scheduled 不插占位记录）→ 不得误删
+    # H: rollback_local_on_fail=False（如直接调用执行器而未传占位记录）→ 不得误删
     #    这里刻意先插一条记录模拟「别的任务的占位」，任务失败后它必须还在
     results.append(run_case(
         "H 不承担回滚时不误删",
@@ -301,4 +301,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    from unittest.mock import patch
+
+    with patch("requests.sessions.Session.request", side_effect=AssertionError("离线回归不得访问网络")):
+        raise SystemExit(main())

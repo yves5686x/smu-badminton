@@ -57,3 +57,6 @@ debug_captcha/book_probe_result.json
 debug_captcha/captcha_expiry_result.json
 debug_captcha/*.png
 debug_captcha/*.log
+
+# Local session artifact
+:memory:.ses

@@ -337,6 +337,11 @@ def init_db_tables():
             );
             """
         )
+        # 兼容已有数据库：任务保存占位记录 ID，重启后仍能准确释放自己的记录。
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(scheduled_jobs)")}
+        if "local_booking_id" not in columns:
+            conn.execute("ALTER TABLE scheduled_jobs ADD COLUMN local_booking_id INTEGER")
+        # 旧任务的占位归属无法可靠推断，保持 NULL，不冒险删除其他任务的记录。
         # job_id 唯一索引（显式创建，确保存在）
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_job_id ON scheduled_jobs(job_id);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status ON scheduled_jobs(status);")

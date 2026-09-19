@@ -25,6 +25,16 @@ jobs:
         # network 标记的测试依赖外部网络（校时接口/CAS），CI 环境不可达/不稳定，跳过
         run: python -m pytest tests/unit/ tests/integration/ -m "not network" --tb=short
 
+      - name: Verify booking pipeline offline
+        run: python scripts/verify_rush_pipeline.py
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Verify booking user interactions
+        run: node --test tests/frontend/booking.test.cjs
+
   lint:
     runs-on: ubuntu-latest
     steps:

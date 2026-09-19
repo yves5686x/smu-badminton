@@ -154,7 +154,9 @@ async function fetchJobs() {
         }
 
         // 合并活跃任务和数据库历史任务
-        const memoryJobs = data.data.jobs || [];
+        const memoryJobs = (data.data.jobs || []).map(job => ({
+            ...job, status: (data.data.db_jobs || []).find(row => row.job_id === job.job_id)?.status
+        }));
         const dbJobs = data.data.db_jobs || [];
 
         // 构建内存任务的ID映射（用于去重）
@@ -227,8 +229,8 @@ function renderJobs(jobs) {
     }
 
     tbody.innerHTML = jobs.map(job => {
-        const statusClass = job.alive ? 'running' : (job.status || 'done');
-        const statusText = job.alive ? '执行中' : getStatusText(job.status, job.type);
+        const statusClass = job.status || (job.alive ? 'running' : 'done');
+        const statusText = getStatusText(job.status || (job.alive ? 'running' : ''), job.type);
         const createdAt = new Date(job.created_at * 1000).toLocaleString();
 
         return `
@@ -325,7 +327,7 @@ async function stopJob(jobId) {
         const data = await resp.json();
 
         if (data.ok) {
-            Toast.success('已停止', '任务停止请求已发送');
+            Toast.info('已请求停止', '请等待任务结束；已发出的预约请求仍可能成功');
             fetchJobs();
         } else {
             const msg = data.message || data.error || '未知错误';

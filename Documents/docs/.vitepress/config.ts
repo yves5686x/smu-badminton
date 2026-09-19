@@ -30,6 +30,7 @@ export default defineConfig({
           { text: '安装部署', link: '/guide/install' },
           { text: 'CAS认证', link: '/guide/cas-auth' },
           { text: '预约功能', link: '/guide/booking' },
+          { text: '开发结构', link: '/guide/architecture' },
           { text: 'API文档', link: '/guide/api' },
           { text: '配置参数', link: '/guide/config' },
           { text: 'OCR验证码', link: '/guide/ocr-captcha' },

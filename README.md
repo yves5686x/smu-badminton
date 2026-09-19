@@ -34,7 +34,11 @@ src/smu_badminton/      FastAPI 服务与核心业务逻辑
   routes_config.py      配置路由（读取/热更新）
   cas_login.py          CAS 认证流程（含验证码 JSON + token 同源抓取）
   cas_ocr.py            ddddocr 算术验证码识别
-  cas_manager.py        BookingManager：任务编排与持久化
+  booking_service.py    统一预约规则、占位与取消用例
+  booking_store.py      任务/占位持久化与原子状态转换
+  cas_manager.py        后台任务执行、等待、预取与提交
+  credentials.py        预约凭据解析与 token 获取
+  availability.py       公共缓存与个人预约合并
   booking_api.py        资源/时段/预约的 GraphQL 调用
   token_profile.py      token 与用户账号凭据缓存（含会话 exp 解析）
   core_utils.py         线程安全 SQLite 连接池、异常、密码混淆
@@ -48,6 +52,8 @@ Documents/docs/         VitePress 文档
 docker-compose.yml      Docker Compose 启动配置
 Dockerfile              镜像构建文件
 ```
+
+架构边界、状态与流程、数据库升级说明见[开发结构](Documents/docs/guide/architecture.md)。
 
 ## 快速开始
 

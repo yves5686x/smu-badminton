@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
-from smu_badminton.cas_manager import get_token_cached, resolve_login_credentials
+from smu_badminton.credentials import get_token_cached, resolve_login_credentials
 from smu_badminton.token_profile import (
     clear_token_cache,
     delete_user_account,
@@ -67,7 +67,7 @@ def test_get_token_cached_uses_saved_account(cleanup_account):
     username = cleanup_account
     save_user_account(username, "saved_pwd", "https://saved/login", "https://saved/captcha")
 
-    with patch("smu_badminton.cas_manager.login_with_retry") as mock_login:
+    with patch("smu_badminton.credentials.login_with_retry") as mock_login:
         mock_login.return_value = {"access_token": "at", "id_token": "it"}
         tokens = get_token_cached("", "", username, "")
 
@@ -79,6 +79,6 @@ def test_get_token_cached_uses_saved_account(cleanup_account):
 
 def test_get_token_cached_without_credentials(cleanup_account):
     """无任何凭据时返回 None，不发起登录。"""
-    with patch("smu_badminton.cas_manager.login_with_retry") as mock_login:
+    with patch("smu_badminton.credentials.login_with_retry") as mock_login:
         assert get_token_cached("", "", cleanup_account, "") is None
     mock_login.assert_not_called()

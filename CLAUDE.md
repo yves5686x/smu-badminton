@@ -86,64 +86,32 @@ Two local-environment gotchas that look like code/upstream bugs but are neither:
 
 `src/smu_badminton/` with src layout. Entry point: `smu_badminton.server_fastapi:main`.
 
-### Core Modules
+### Module boundaries
 
-| Module | Purpose |
-|--------|---------|
-| `server_fastapi.py` | FastAPI app, lifespan, middleware wiring, static files, `main()` console-script 入口 |
-| `schemas.py` | Pydantic 请求/响应模型（错误约定：`{ok:false, error, message}`） |
-| `middleware.py` | 纯 ASGI Metrics/RateLimit 中间件 + `snapshot_metrics()` |
-| `locks.py` | 资源锁（`get_resource_lock`）与可用性公共缓存（`avail_cache_get/put`） |
-| `routes_auth.py` | 认证路由：验证码 / 登录 / 登出 / 静默续期 |
-| `routes_booking.py` | 预约路由：即时 / 定时 / 可用性查询 / 本地记录；`booking_precheck` 共享前置校验 |
-| `routes_jobs.py` | 任务路由：任务列表 / 停止 / 单任务状态 / metrics |
-| `routes_config.py` | 配置路由：读取 / 热更新 |
-| `cas_login.py` | CAS auth flow: URL resolution, captcha prep, login with auto/manual captcha, error detection |
-| `http_utils.py` | HTTP retry helpers, network time sync, `ClockSync` offset calibration |
-| `booking_api.py` | Resource queries, time slot queries, appointment creation/cancellation, availability computation (parallel via ThreadPoolExecutor + shared Session), thread-local session reuse (`get_thread_session`) |
-| `cas_manager.py` | `BookingManager` singleton: job create/track/stop, DB persistence, scheduled/immediate booking orchestration, `get_token_cached`（凭据回退咽喉点） |
-| `cas_ocr.py` | Arithmetic captcha OCR via ddddocr whole-image recognition (replaced deprecated NCNN ResNet pipeline after site font change) |
-| `slide_captcha.py` | 滑块验证码缺口识别（alpha 边缘模板匹配 + 多方法兜底投票） |
-| `token_profile.py` | Token/profile caches (JWT claim parsing), saved user accounts, silent re-login; `session_exp_epoch()`（会话 exp：access_token → id_token 回退） |
-| `core_utils.py` | Thread-safe SQLite `DatabasePool`, custom exceptions (`BookingError`, `DatabaseError`), error handling decorators (`handle_errors`, `db_operation`), password obfuscation |
-| `config.py` | Environment configuration from `.env`; SECRET_KEY 自动生成并持久化 |
+See `Documents/docs/guide/architecture.md` for the current design and migration policy.
 
-### Module Dependencies
+- `routes_*`: HTTP adapters; blocking calls use `run_in_threadpool`. No cross-route imports or booking SQL.
+- `booking_service.py`: common reservation rules for all four booking endpoints; cancellation orchestration.
+- `booking_store.py`: SQL, atomic status transitions and reservation ownership (`local_booking_id`).
+- `cas_manager.py`: single-process thread executor, timed prefetch/submission; one shared immediate attempt.
+- `credentials.py`: credential resolution and cached login; `token_profile.py` keeps token/account storage.
+- `booking_api.py`: upstream GraphQL and captcha APIs. Query failures raise `UpstreamQueryError`, never imply empty bookings.
+- `availability.py`: date-keyed public cache and single-flight queries; per-user appointments merged separately.
+  Resources and capacity are identical across users. Caller cancellation does not cancel the shared query.
+- `server_fastapi.py`: lifecycle and middleware wiring; cleanup delegates to the store.
+- `locks.py` was removed: reservation transactions now enforce conflicts atomically.
 
-```
-server_fastapi → routes_{auth,booking,jobs,config}, middleware, locks, cas_manager, core_utils, config
-routes_*       → schemas, locks, cas_manager, booking_api, token_profile, core_utils
-cas_manager    → cas_login, booking_api, http_utils, token_profile, core_utils
-booking_api    → http_utils (retry helpers), token_profile, slide_captcha, config
-cas_login      → cas_ocr, http_utils(间接), config
-```
-
-### Data Flow
-
-1. **Login**: `prepare_login_session()` / `login_with_auto_captcha()` → CAS login page → captcha OCR → POST credentials → follow redirects → extract OIDC tokens (access_token + id_token) from URL fragment
-2. **Availability**: `POST /api/availability` → check 60s public cache (shared across users, keyed by bookdate) → cache HIT: only query appointments for `bookedByMe`; cache MISS: full query (resources + time slots + appointments) via shared `requests.Session` with connection pooling → store slots in public cache, merge `bookedByMe` per-user
-3. **Immediate Booking**: `POST /api/book` → lock resource → insert `local_bookings` → `book_badminton_slot()` → single-threaded attempt
-4. **Scheduled Booking**: `POST /api/book/schedule` → `BookingManager.start_scheduled_booking()` → wait until target time → login → prefetch → spawn N barrier-synchronized worker threads → fire booking requests simultaneously
-
-### Key Design Patterns
-
-- **Token Caching**: `get_token_cached()` per-user dict with configurable TTL (default 900s), thread-safe
-- **Profile Caching**: `_TOKEN_PROFILE_CACHE` stores user profile from JWT claims
-- **Server-side Credential Hosting**: 登录成功后服务端自动保存账号（`user_accounts` 表，XOR+base64 混淆，v2: 前缀）。预约/任务接口的 `password` 字段可省略，`get_token_cached()` 在缓存未命中时自动回退到保存的凭据重新登录；前端 localStorage 只存 `{username}` + token，密码不落地不重发。无凭据时路由返回 `no_saved_credentials`
-- **Public Availability Cache**: `locks.avail_cache_get/put` keyed by bookdate (60s TTL), shared across all users — slots data is the same for everyone; only `bookedByMe` is queried per-user on cache HIT
-- **Shared HTTP Session**: `_shared_session()` creates `requests.Session` with connection pool (20 conns) for reuse across parallel GraphQL queries within a single availability request
-- **GraphQL Request Helper**: `_make_graphql_request()` centralizes retry logic (2 attempts, 0.3s backoff), SSL error detection, and slow-query logging (>500ms)
-- **Resource Locking**: asyncio locks per `(resources_name, bookdate, kssj, jssj)` prevent duplicate concurrent bookings; separate thread locks for sync code
-- **Local Booking Tracking**: SQLite `local_bookings` UNIQUE constraint `(bookdate, resources_name, kssj, jssj)` prevents race conditions at DB level
-- **Job Persistence**: `scheduled_jobs` table survives server restarts; `load_pending_jobs()` restores on startup
-- **Password Obfuscation**: XOR + base64 with `SECRET_KEY`（v2: 版本前缀；未配置时自动生成随机密钥持久化到 `DATA_DIR/secret_key`，换钥后旧数据按失效处理）
-- **Thread-safe SQLite**: `DatabasePool` uses `threading.local()` for per-thread connections, WAL mode
+Task cancellation is cooperative. A request already sent to the school may succeed; wait for it to return,
+record success and retain the reservation. `stop_by_params` returns `upstream_status=pending` while a worker
+is still active; callers should check completion and cancel the upstream booking afterward if needed.
 
 ### Database Schema
 
-Two SQLite tables via `core_utils.DatabasePool`:
+Four SQLite tables via `core_utils.DatabasePool`:
 - `local_bookings`: Tracks active bookings (UNIQUE on bookdate, resources_name, kssj, jssj)
-- `scheduled_jobs`: Persists booking jobs across restarts
+- `scheduled_jobs`: Persists booking jobs and reservation ownership across restarts
+- `user_accounts`: Saved credentials
+- `app_settings`: Runtime configuration
 
 ### Scheduled Booking Timing
 
@@ -162,7 +130,7 @@ Target time = `bookdate - 7 days + target_time_str`. E.g., booking for 2025-12-1
 
 ### Rush Scheduling Pipeline (start_scheduled_booking)
 
-T-75s wake → `ClockSync.sync()` measures network-vs-local offset → login (session expiry pre-checked against target time via `session_exp_epoch()`, refreshed early if needed — it reads `id_token`'s `exp` because `access_token` is opaque) → dedupe check + resource/time prefetch + user_info resolution all through one warmed `_shared_session()` → build captcha pool (`min(num_threads, 2)` credentials, retry until T-35s) → workers wait via local clock + offset (zero HTTP near T-0) → barrier → each shot fires single-shot (`allow_retry=False`, 4s timeout) with its own credential → first success stops the rest. Ban responses are detected and logged with the 3-minute unban implication.
+T-75s wake → `ClockSync.sync()` measures network-vs-local offset → login (session expiry pre-checked against target time via `session_exp_epoch()`, refreshed early if needed — it reads `id_token`'s `exp` because `access_token` is opaque) → dedupe check + resource/time prefetch + user_info resolution all through one warmed `create_session()` → build captcha pool (`min(num_threads, 2)` credentials, retry until T-35s) → workers wait via local clock + offset (zero HTTP near T-0) → barrier → each shot fires single-shot (`allow_retry=False`, 4s timeout) with its own credential → first success stops the rest. Ban responses are detected and logged with the 3-minute unban implication.
 
 Two details matter because slots are released at 21:00 for a date 7 days out:
 
@@ -174,12 +142,10 @@ Two details matter because slots are released at 21:00 for a date 7 days out:
   attached to the mutation when validation is confirmed to be on. Captcha credentials are
   token-scoped, not slot-scoped (`gen_slide_captcha(token)` takes no slot id), which is what makes
   speculation valid.
-- **Failure must roll back the local placeholder.** `local_bookings` has
-  `UNIQUE(bookdate, resources_name, kssj, jssj)` — keyed by *slot*, not by user. A leftover row from
-  a failed rush blocks that user from ever retrying the date (「您当天已有预约记录」) and shows the
-  slot as taken to everyone else. Rollback follows "whoever inserted rolls back", controlled by
-  `rollback_local_on_fail` (True for `/api/book/schedule` and `/api/jobs/immediate`, False for
-  `/api/jobs/scheduled`).
+- **Failure releases only the owned reservation.** All Web booking entry points reserve through
+  `BookingService`; `scheduled_jobs.local_booking_id` persists ownership. The store atomically updates
+  terminal status and removes only that row. Legacy rows with unknown ownership stay NULL on migration.
+  `rollback_local_on_fail` remains for old script callers; Web routes pass an explicit reservation ID.
 
 ### Booking result classification
 

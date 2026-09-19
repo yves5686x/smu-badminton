@@ -5,10 +5,38 @@ Pydantic 请求/响应模型。
 成功响应：{"ok": true, "data": ...}。
 """
 
-from pydantic import BaseModel, Field
+from datetime import date, time
+
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
-class BookRequest(BaseModel):
+class DatedRequest(BaseModel):
+    """日期在 HTTP 边界校验，输出仍为上游接口需要的字符串。"""
+
+    @field_validator("bookdate", check_fields=False)
+    @classmethod
+    def valid_date(cls, value):
+        date.fromisoformat(value)
+        return value
+
+
+class BookingSlot(DatedRequest):
+    """场次的共同边界校验。"""
+
+    @field_validator("kssj", "jssj", "target_time_str", check_fields=False)
+    @classmethod
+    def valid_time(cls, value):
+        time.fromisoformat(value)
+        return value
+
+    @model_validator(mode="after")
+    def ordered_times(self):
+        if self.kssj >= self.jssj:
+            raise ValueError("结束时间必须晚于开始时间")
+        return self
+
+
+class BookRequest(BookingSlot):
     login_url: str = Field("", description="CAS 登录URL（可省略，服务端使用配置默认值）")
     captcha_url: str = Field("", description="验证码URL（可省略，服务端使用配置默认值）")
     username: str = Field(..., description="学号/用户名")
@@ -26,8 +54,8 @@ class BookResponse(BaseModel):
 
 
 class ScheduleRequest(BookRequest):
-    target_time_str: str = Field(..., description="目标开抢时间，格式 HH:MM:SS")
-    num_threads: int = Field(5, ge=1, le=5, description="并发线程数")  # 限制 1-5
+    target_time_str: str = Field(..., pattern=r"^\d{2}:\d{2}:\d{2}$", description="目标开抢时间，格式 HH:MM:SS")
+    num_threads: int = Field(2, ge=1, le=5, description="并发线程数")  # 限制 1-5
     run_async: bool = Field(False, description="是否后台异步执行（立即返回）")
 
 
@@ -35,7 +63,8 @@ class ScheduleResponse(BookResponse):
     pass
 
 
-class AvailabilityRequest(BaseModel):
+class AvailabilityRequest(DatedRequest):
+    force_refresh: bool = False
     token: str = Field(..., description="访问令牌")
     bookdate: str = Field(..., pattern=r"\d{4}-\d{2}-\d{2}", description="预约日期 YYYY-MM-DD")
 
@@ -52,12 +81,11 @@ class JobScheduledRequest(ScheduleRequest):
     pass
 
 
-class JobsListResponse(BaseModel):
-    ok: bool
-    data: dict | None = None
+class JobsListResponse(BookResponse):
+    message: str | None = None
 
 
-class LocalBookingRequest(BaseModel):
+class LocalBookingRequest(BookingSlot):
     username: str = Field(..., description="用户名")
     bookdate: str = Field(..., pattern=r"\d{4}-\d{2}-\d{2}", description="预约日期")
     resources_name: str = Field(..., description="资源名称")
@@ -65,7 +93,7 @@ class LocalBookingRequest(BaseModel):
     jssj: str = Field(..., pattern=r"^\d{2}:\d{2}$", description="结束时间")
 
 
-class StopByParamsRequest(BaseModel):
+class StopByParamsRequest(BookingSlot):
     username: str = Field(..., description="用户名")
     bookdate: str = Field(..., pattern=r"\d{4}-\d{2}-\d{2}", description="预约日期")
     kssj: str = Field(..., pattern=r"^\d{2}:\d{2}$", description="开始时间")

@@ -571,6 +571,7 @@ SMU Badminton 提供 RESTful API，所有接口返回 JSON 格式数据。基础
 
 | upstream_status | 含义 |
 |-----------------|------|
+| `pending` | 已请求停止，等待正在执行的请求结束；稍后确认并按需再次取消 |
 | `cancelled` | 学校侧预约已成功撤销 |
 | `none` | 学校侧没有匹配时段的有效预约 |
 | `skipped` | 无可用凭据，仅取消了本地排队 |

@@ -9,11 +9,13 @@ import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, ORJSONResponse, Response
 from starlette.staticfiles import StaticFiles
 
+from .booking_store import booking_store
 from .cas_manager import booking_manager
 from .config import (
     BASE_DIR,
@@ -24,7 +26,6 @@ from .config import (
     get_missing_required_settings,
 )
 from .core_utils import close_db_pool, init_db_tables
-from .locks import locks_cleanup
 from .middleware import MetricsMiddleware, RateLimitMiddleware
 
 # 导入路由模块
@@ -51,7 +52,6 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"加载待处理任务失败: {e}")
 
-    _lock_cleanup_task = asyncio.create_task(locks_cleanup())
     _jobs_cleanup_task = asyncio.create_task(_jobs_cleanup())
     _lbookings_cleanup_task = asyncio.create_task(_stale_local_bookings_cleanup())
     for warning in get_missing_required_settings():
@@ -59,9 +59,9 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        _lock_cleanup_task.cancel()
         _jobs_cleanup_task.cancel()
         _lbookings_cleanup_task.cancel()
+        await asyncio.gather(_jobs_cleanup_task, _lbookings_cleanup_task, return_exceptions=True)
         # 关闭数据库连接池
         close_db_pool()
 
@@ -70,26 +70,15 @@ async def _stale_local_bookings_cleanup():
     """周期清理已过场的本地预约记录（原 GET /local_bookings 内联逻辑，移到后台）。"""
     from datetime import datetime, timedelta, timezone
 
-    from .core_utils import get_db_pool
 
     beijing_tz = timezone(timedelta(hours=8))
     while True:
         try:
             await asyncio.sleep(600)  # 每10分钟清理一次
             now_dt = datetime.now(beijing_tz)
-            with get_db_pool().get_connection() as conn:
-                cur = conn.execute("SELECT id, bookdate, jssj FROM local_bookings")
-                to_delete = []
-                for row_id, bookdate, jssj in cur.fetchall():
-                    try:
-                        end_dt = datetime.strptime(f"{bookdate} {jssj}", "%Y-%m-%d %H:%M").replace(tzinfo=beijing_tz)
-                        if end_dt < now_dt:
-                            to_delete.append((row_id,))
-                    except ValueError:
-                        continue
-                if to_delete:
-                    conn.executemany("DELETE FROM local_bookings WHERE id = ?", to_delete)
-                    logger.info(f"清理了 {len(to_delete)} 条过期预约记录")
+            deleted = await run_in_threadpool(booking_store.cleanup_local, now_dt)
+            if deleted:
+                logger.info("清理了 %d 条过期预约记录", deleted)
         except asyncio.CancelledError:
             break
         except Exception as e:
@@ -100,19 +89,12 @@ async def _jobs_cleanup():
     """定期清理历史任务记录。"""
     import time as _time
 
-    from .core_utils import get_db_pool
 
-    statuses = ("done", "failed", "cancelled", "skipped")
     while True:
         try:
             await asyncio.sleep(3600)  # 每60分钟清理一次
             cutoff = _time.time() - float(JOB_RETENTION_SEC)
-            with get_db_pool().get_connection() as conn:
-                cur = conn.execute(
-                    f"DELETE FROM scheduled_jobs WHERE status IN ({','.join(['?']*len(statuses))}) AND created_at < ?",
-                    (*statuses, cutoff),
-                )
-                deleted = cur.rowcount if cur.rowcount is not None else 0
+            deleted = await run_in_threadpool(booking_store.cleanup_history, cutoff)
             if deleted:
                 logger.info(f"清理历史任务: 删除 {deleted} 条超过保留期({JOB_RETENTION_SEC}s) 的记录")
         except asyncio.CancelledError:

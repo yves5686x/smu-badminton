@@ -4,7 +4,7 @@
 包含用户信息解析、预约 API 调用、可用性查询等功能。
 
 接口规范：
-- 列表类函数失败返回 []（空列表）
+- 场地/预约查询失败抛出 UpstreamQueryError，不将失败伪装成空列表
 - 对象类函数失败返回 None
 - 写操作返回统一结构 {"code": str, "messages": list}
 - 所有公开函数参数顺序：必需参数在前，可选参数在后（id_token 默认 ""，session 默认 None）
@@ -33,6 +33,37 @@ from .token_profile import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class UpstreamQueryError(RuntimeError):
+    """查询失败，不能解释为没有预约或没有场地。"""
+
+
+class UpstreamAuthenticationError(UpstreamQueryError):
+    """认证失效，前端可以尝试续期。"""
+
+
+def _query_data(response, field):
+    if response is None:
+        raise UpstreamQueryError(f"{field}: 无响应")
+    if response.status_code in (401, 403):
+        raise UpstreamAuthenticationError(f"{field}: 登录失效")
+    if response.status_code != 200:
+        raise UpstreamQueryError(f"{field}: HTTP {response.status_code}")
+    try:
+        body = response.json()
+        errors = body.get("errors")
+        if errors:
+            if "ACCESS_TOKEN_INVALID" in str(errors) or "过期" in str(errors):
+                raise UpstreamAuthenticationError(f"{field}: 登录失效")
+            raise UpstreamQueryError(f"{field}: 上游查询失败")
+        data = body["data"][field]
+        if data is None:
+            raise UpstreamQueryError(f"{field}: 数据为空")
+        return data
+    except (AttributeError, KeyError, TypeError, ValueError) as exc:
+        raise UpstreamQueryError(f"{field}: 响应格式异常") from exc
+
 
 
 # ============= HTTP 请求常量和辅助函数 =============
@@ -77,7 +108,7 @@ def _graphql_url(id_token: str = "") -> str:
     return WF_API_URL
 
 
-def _shared_session() -> requests.Session:
+def create_session() -> requests.Session:
     """创建带连接池的共享 Session，复用 TCP/TLS 连接。"""
     s = requests.Session()
     adapter = requests.adapters.HTTPAdapter(pool_connections=20, pool_maxsize=20)
@@ -93,13 +124,13 @@ def get_thread_session() -> requests.Session:
     """返回当前线程专属的复用 Session。
 
     run_in_threadpool 的 worker 线程会被复用，线程本地 Session 的连接池因此
-    跨请求保活，省掉每次请求的 TCP/TLS 握手（相比「每次 _shared_session()
+    跨请求保活，省掉每次请求的 TCP/TLS 握手（相比「每次 create_session()
     再 close」的模式）。借出前清空 cookies：GraphQL 认证走 Bearer 头，
     cookies 跨用户残留没有任何收益，只带来串用风险。
     """
     s = getattr(_THREAD_SESSIONS, "session", None)
     if s is None:
-        s = _shared_session()
+        s = create_session()
         _THREAD_SESSIONS.session = s
     s.cookies.clear()
     return s
@@ -111,9 +142,10 @@ def _make_graphql_request(
     headers: dict[str, str],
     payload: dict[str, Any],
     log_name: str = "",
-    token: str = ""
+    token: str = "",
+    deadline: float | None = None,
 ) -> requests.Response | None:
-    """使用共享 Session 发送 GraphQL 请求，带重试和 token 自动刷新。
+    """使用共享 Session 发送 GraphQL 请求；认证失效交给业务流程统一重登。
 
     Args:
         session: requests.Session 或 requests 模块
@@ -126,7 +158,7 @@ def _make_graphql_request(
     Returns:
         响应对象，失败返回 None
     """
-    max_retries = 2
+    max_retries = 1 if deadline is not None else 2
     timeout = 10
 
     def do_request(current_token: str) -> requests.Response | None:
@@ -134,7 +166,10 @@ def _make_graphql_request(
         current_headers = headers.copy()
         if current_token:
             current_headers["Authorization"] = f"Bearer {current_token}"
-        return session.post(url, json=payload, headers=current_headers, timeout=timeout)
+        remaining = deadline - time.monotonic() if deadline is not None else timeout
+        if remaining <= 0:
+            raise UpstreamQueryError("资源查询时间预算已用完")
+        return session.post(url, json=payload, headers=current_headers, timeout=min(timeout, remaining))
 
     for attempt in range(max_retries):
         try:
@@ -148,21 +183,14 @@ def _make_graphql_request(
                 if "errors" in body:
                     err_msg = body["errors"][0].get("message", "") if body["errors"] else ""
                     logger.warning("%s GraphQL error: %s", log_name, err_msg)
-                    # token 过期：尝试刷新
                     if "ACCESS_TOKEN_INVALID" in str(body) or "过期" in err_msg:
-                        if token and attempt == 0:
-                            from .token_profile import find_user_by_access_token, refresh_token_for_user
-                            username, _ = find_user_by_access_token(token)
-                            if username:
-                                logger.info("检测到 token 过期，尝试刷新: %s", username)
-                                new_tokens = refresh_token_for_user(username)
-                                if new_tokens and new_tokens.get("access_token"):
-                                    token = new_tokens["access_token"]
-                                    logger.info("token 刷新成功，重试请求: %s", log_name)
-                                    continue  # 用新 token 重试
-                        return resp  # 无法刷新，返回原响应
+                        raise UpstreamAuthenticationError(f"{log_name}: 登录失效")
                 return resp
+            if resp.status_code in (401, 403):
+                raise UpstreamAuthenticationError(f"{log_name}: 登录失效")
             logger.warning("%s failed status=%d, retrying (%d/%d)", log_name, resp.status_code, attempt + 1, max_retries)
+        except UpstreamAuthenticationError:
+            raise
         except Exception as e:
             logger.warning("%s exception=%s, retrying (%d/%d)", log_name, e, attempt + 1, max_retries)
             if is_ssl_error(e) and attempt >= 1:
@@ -265,6 +293,8 @@ def get_user_info_from_appointment(
             "phone": node.get("phone", ""),
             "participant_info": participant,
         }
+    except UpstreamAuthenticationError:
+        raise
     except Exception as e:
         _debug(f"get_user_info_from_appointment exception: {e}")
         return None
@@ -343,9 +373,12 @@ def find_time_slots_by_resource(
     }
     s = session or requests
     resp = _make_graphql_request(s, _graphql_url(id_token), headers, payload, f"time_slots({resources_id[:8]})", token=token)
-    if not resp:
-        return None
-    return resp.json()
+    field = "findResourcesTimeSlotByResourcesIdAndDate"
+    slots = _query_data(resp, field)
+    if not isinstance(slots, list):
+        raise UpstreamQueryError("场地时段格式异常")
+    return {"data": {field: slots}}
+
 
 
 def list_resources_by_account(
@@ -354,7 +387,8 @@ def list_resources_by_account(
     type_id: str | None = None,
     id_token: str = "",
     account: str = "",
-    session: requests.Session | None = None
+    session: requests.Session | None = None,
+    deadline: float | None = None,
 ) -> list[dict[str, Any]] | None:
     """
     基于 findResourcesAllByAccount 获取指定日期的资源列表（包含时间段）。
@@ -396,15 +430,13 @@ def list_resources_by_account(
     }
     s = session or requests
     t0 = time.time()
-    resp = _make_graphql_request(s, _graphql_url(id_token), headers, payload, "list_resources", token=token)
+    resp = _make_graphql_request(s, _graphql_url(id_token), headers, payload, "list_resources", token=token, deadline=deadline)
     elapsed = (time.time() - t0) * 1000
     logger.info("[性能] list_resources_by_account: %.0fms", elapsed)
-    if not resp:
-        return None
-    data = resp.json()
-    if 'data' not in data or 'findResourcesAllByAccount' not in data['data']:
-        return None
-    return data['data']['findResourcesAllByAccount']
+    resources = _query_data(resp, "findResourcesAllByAccount")
+    if not isinstance(resources, list):
+        raise UpstreamQueryError("场地资源格式异常")
+    return resources
 
 
 # ============= 预约记录查询 =============
@@ -425,7 +457,7 @@ def list_appointments_for_account(
         session: 可复用的 Session（可选）
 
     Returns:
-        预约记录 edges 列表，失败返回空列表 []
+        预约记录 edges 列表；查询失败抛出 UpstreamQueryError
     """
     # 将 YYYY-MM-DD 转为当天 00:00:00 的毫秒时间戳以便对比
     bookdate_ms = _bookdate_to_ms(bookdate)
@@ -445,6 +477,7 @@ def list_appointments_for_account(
   findAppointmentInformationAllForAccount(first: $first, offset: $offset, after: $after, filter: $filter, appointmentDate: $appointmentDate, only_flow: $only_flow, updateAppointmentState: $updateAppointmentState) {
     edges {
       node {
+        id
         resources_id
         resources_name
         appointment_date
@@ -463,20 +496,18 @@ def list_appointments_for_account(
     t0 = time.time()
     resp = _make_graphql_request(s, _graphql_url(id_token), headers, payload, "list_appointments", token=token)
     logger.debug("[性能] list_appointments_for_account: %.0fms", (time.time() - t0) * 1000)
-    if not resp:
-        return []
+    data = _query_data(resp, "findAppointmentInformationAllForAccount")
     try:
-        data = resp.json()
-        edges = data.get('data', {}).get('findAppointmentInformationAllForAccount', {}).get('edges', [])
-        # 过滤同一天的预约（appointment_date 为毫秒）
-        same_day = [e for e in edges if abs(int(e.get('node', {}).get('appointment_date', 0)) - bookdate_ms) < 24*60*60*1000]
-        return same_day
-    except Exception as e:
-        logger.warning("list_appointments_for_account parse error: %s", e)
-        return []
+        edges = data["edges"]
+        if not isinstance(edges, list):
+            raise TypeError("edges 应为列表")
+        return [e for e in edges if int(e["node"]["appointment_date"]) == bookdate_ms]
+    except (AttributeError, KeyError, TypeError, ValueError) as exc:
+        raise UpstreamQueryError("预约记录响应格式异常") from exc
 
 
-def _build_my_bookings_map(my_edges: list[dict[str, Any]]) -> dict[tuple[str, str, str], bool]:
+
+def build_my_bookings_map(my_edges: list[dict[str, Any]]) -> dict[tuple[str, str, str], bool]:
     """从预约记录构建 bookedByMe 映射。"""
     my_map: dict[tuple[str, str, str], bool] = {}
     for e in my_edges:
@@ -486,7 +517,7 @@ def _build_my_bookings_map(my_edges: list[dict[str, Any]]) -> dict[tuple[str, st
     return my_map
 
 
-def _fetch_all_time_slots(
+def fetch_all_time_slots(
     token: str,
     bookdate: str,
     resources: list[dict[str, Any]],
@@ -513,15 +544,19 @@ def _fetch_all_time_slots(
             detail = None
             try:
                 detail = fut.result()
+            except UpstreamQueryError:
+                raise
             except Exception as e:
-                logger.warning("fetch time slots failed, resource_id=%s, error=%s", rid, e)
+                raise UpstreamQueryError(f"场地时段查询失败: {rid}") from e
+            if detail is None:
+                raise UpstreamQueryError(f"场地时段响应为空: {rid}")
             results_map[rid] = (rname, detail)
     t4 = time.time()
     logger.info("[性能] 获取%d个场地时间槽: %.0fms", len(rid_list), (t4 - t3) * 1000)
     return results_map
 
 
-def _merge_bookings(
+def merge_bookings(
     slots_data: dict[str, tuple[str, dict[str, Any] | None]],
     my_map: dict[tuple[str, str, str], bool],
     t0: float | None = None
@@ -602,6 +637,8 @@ def check_resource_time_slot_capacity(
             return None
         data = resp.json()
         return (data.get("data") or {}).get("checkResourceTimeSlotCapacity")
+    except UpstreamAuthenticationError:
+        raise
     except Exception as e:
         logger.warning("check_resource_time_slot_capacity error: %s", e)
         return None
@@ -714,12 +751,13 @@ def fetch_resource_time_id(
     kssj: str,
     jssj: str,
     id_token: str = "",
-    session: requests.Session | None = None
+    session: requests.Session | None = None,
+    deadline: float | None = None,
 ) -> tuple[str, str, str] | None:
     """
     获取资源和时间段 ID，以及验证码要求。
 
-    复用 list_resources_by_account 的查询与重试逻辑（含 token 过期自动刷新）。
+    复用 list_resources_by_account 的查询与重试逻辑（认证失效由业务流程统一处理）。
 
     Args:
         token: 访问令牌
@@ -733,7 +771,7 @@ def fetch_resource_time_id(
     Returns:
         (resource_id, time_id, open_captcha_verify) 元组，失败返回 None
     """
-    resources = list_resources_by_account(token, bookdate, id_token=id_token, session=session)
+    resources = list_resources_by_account(token, bookdate, id_token=id_token, session=session, deadline=deadline)
     if not resources:
         logger.warning("fetch_resource_time_id: 返回数据格式异常或无资源数据")
         return None
@@ -789,7 +827,7 @@ def make_appointment(
     """
     _debug(f"appointment args date={bookdate}, start={kssj}, end={jssj}")
 
-    user_info = user_info or resolve_user_info(token, id_token=id_token)
+    user_info = user_info or resolve_user_info(token, id_token=id_token, session=session)
     if not user_info:
         return {
             "code": "USER_INFO_UNAVAILABLE",
@@ -1185,7 +1223,9 @@ def find_my_appointment_id(
             continue
         if resources_name and n.get("resources_name") != resources_name:
             continue
-        return str(n.get("id") or "") or None
+        if not n.get("id"):
+            raise UpstreamQueryError("预约记录缺少 ID，无法安全取消")
+        return str(n["id"])
     return None
 
 
